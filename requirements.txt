@@ -1,0 +1,32 @@
+# requirements.txt
+
+# Basis-Abhängigkeiten
+numpy>=1.23.0
+pandas>=1.5.0
+python-dotenv>=0.21.0
+PyYAML>=6.0
+requests>=2.28.0
+matplotlib>=3.6.0
+seaborn>=0.12.0
+
+# Trading und Finanzen
+ccxt>=2.6.0
+yfinance>=0.1.70
+ta-lib>=0.4.25
+alpha_vantage>=2.3.1
+
+# Machine Learning
+scikit-learn>=1.1.2
+tensorflow>=2.9.0
+torch>=1.13.0
+
+# LLM-Integration
+transformers>=4.24.0
+accelerate>=0.16.0
+bitsandbytes>=0.38.0  # Für 4-bit Quantisierung
+
+# Telegram-Bot
+python-telegram-bot>=13.15
+
+# Diagramme und Visualisierung
+plotly>=5.10.0

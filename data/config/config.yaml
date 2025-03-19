@@ -1,0 +1,64 @@
+general:
+  bot_name: "GemmaTrader"
+  log_level: "INFO"
+  timezone: "Europe/Berlin"
+  data_path: "data"
+  version: "1.0.0"
+
+data_pipeline:
+  update_intervals:
+    crypto: 60
+    stocks: 300
+    forex: 300
+    macro: 86400
+    news: 3600
+  crypto_assets:
+    - "BTC/USDT:USDT"
+    - "ETH/USDT:USDT"
+    - "BNB/USDT:USDT"
+    - "SOL/USDT:USDT"
+    - "XRP/USDT:USDT"
+  timeframes:
+    - "1m"
+    - "5m"
+    - "15m"
+    - "1h"
+    - "4h"
+    - "1d"
+
+trading:
+  mode: "paper"  # 'paper', 'live', 'disabled'
+  default_leverage: 3
+  max_leverage: 10
+  risk_per_trade: 0.01  # 1% des Kapitals pro Trade
+  max_open_trades: 3
+  default_stop_loss_pct: 0.05  # 5% Stop-Loss
+  default_take_profit_pct: 0.15  # 15% Take-Profit
+  sandbox_mode: true
+
+black_swan_detector:
+  volatility_threshold: 3.5
+  volume_threshold: 5.0
+  correlation_threshold: 0.85
+  news_sentiment_threshold: -0.6
+  check_interval: 300  # Sekunden
+
+telegram:
+  notification_level: "INFO"
+  status_update_interval: 3600  # Sekunden
+  commands_enabled: true
+
+learning_module:
+  backtest_days: 90
+  paper_trading_days: 14
+  target_win_rate: 0.6
+  training:
+    epochs: 100
+    batch_size: 32
+    validation_split: 0.2
+    patience: 10
+
+tax_module:
+  default_method: "FIFO"  # FIFO, LIFO, HIFO
+  country: "DE"
+  exempt_limit: 600  # Freigrenze in Euro
