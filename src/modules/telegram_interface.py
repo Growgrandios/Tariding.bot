@@ -370,8 +370,8 @@ class TelegramInterface:
         if not self._check_authorized(update):
             await update.message.reply_text("⛔ Du bist nicht autorisiert, diesen Bot zu verwenden.")
             return
-        
-       help_text = (
+
+         help_text = (
             "🤖 *Gemma Trading Bot - Hilfe*\n\n"
             "*Basis-Befehle:*\n"
             "/start - Startet den Bot\n"
@@ -399,7 +399,7 @@ class TelegramInterface:
             "/restart - Startet den Trading-Bot neu\n"
             "/process_transcript - Verarbeitet ein Transkript"
         )
-        
+
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
     async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
