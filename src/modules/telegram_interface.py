@@ -1713,22 +1713,41 @@ class TelegramInterface:
         # Beispiel: Speichern der Nachricht in einer Transkriptdatei
 
    def _get_recent_transcripts(self, limit: int = 5) -> List[Dict[str, Any]]:
-        """
-        Gibt eine Liste der zuletzt aufgezeichneten Transkripte zurück.
+    """
+    Gibt eine Liste der zuletzt aufgezeichneten Transkripte zurück.
+    
+    Args:
+        limit: Maximale Anzahl der zurückzugebenden Transkripte
         
-        Args:
-            limit: Maximale Anzahl der zurückzugebenden Transkripte
+    Returns:
+        Liste mit Transkript-Informationen
+    """
+    try:
+        transcripts = []
+        
+        # Suche nach Transkriptdateien
+        for file_path in sorted(self.transcript_dir.glob('transcript_*.txt'), reverse=True):
+            if len(transcripts) >= limit:
+                break
             
-        Returns:
-            Liste mit Transkript-Informationen
-        """
-        try:
-            transcripts = []
-            
-            # Suche nach Transkriptdateien
-             def _get_recent_transcripts(self, limit: int = 5) -> List[Dict[str, Any]]:
-        # ... Ihre Implementierung ...
+            # Extrahiere Datum aus Dateinamen
+            match = re.search(r'transcript_(\d{8}).*\.txt', file_path.name)
+            if match:
+                date_str = match.group(1)
+                date = datetime.strptime(date_str, '%Y%m%d')
+                
+                # Prüfe Dateigröße
+                size = file_path.stat().st_size
+                
+                transcripts.append({
+                    'path': str(file_path),
+                    'date': date,
+                    'size': size
+                })
+        
+        return transcripts
+    except Exception as e:
+        self.logger.error(f"Fehler beim Abrufen der Transkripte: {str(e)}")
+        return []
 
-    # Weitere Methoden hier (falls vorhanden)
-
-# Ende der Klasse TelegramInterface  <-- Dies fehlt
+# Ende der Klasse TelegramInterface
