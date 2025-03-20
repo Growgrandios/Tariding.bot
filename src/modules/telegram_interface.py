@@ -365,42 +365,42 @@ class TelegramInterface:
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
-    async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler für den /help Befehl."""
-        if not self._check_authorized(update):
-            await update.message.reply_text("⛔ Du bist nicht autorisiert, diesen Bot zu verwenden.")
-            return
+   async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler für den /help Befehl."""
+    if not self._check_authorized(update):
+        await update.message.reply_text("⛔ Du bist nicht autorisiert, diesen Bot zu verwenden.")
+        return
 
-         help_text = (
-            "🤖 *Gemma Trading Bot - Hilfe*\n\n"
-            "*Basis-Befehle:*\n"
-            "/start - Startet den Bot\n"
-            "/help - Zeigt diese Hilfe an\n"
-            "/status - Zeigt den aktuellen Status des Trading-Bots\n\n"
-            
-            "*Trading-Informationen:*\n"
-            "/balance - Zeigt den aktuellen Kontostand\n"
-            "/positions - Zeigt offene Positionen\n"
-            "/performance - Zeigt Performance-Metriken\n\n"
-            
-            "*Marktdaten & Berichte:*\n"
-            "/price [Symbol] - Aktueller Preis (z.B. /price BTC)\n"
-            "/chart [Symbol] [Zeitraum] - Zeigt ein Preisdiagramm\n"
-            "/news [Thema] - Aktuelle Krypto-/Börsennachrichten\n"
-            "/daily_report - Täglicher Zusammenfassungsbericht\n\n"
-            
-            "*Bot-Steuerung:*\n"
-            "/start_bot - Startet den Trading-Bot\n"
-            "/stop_bot - Stoppt den Trading-Bot\n"
-            "/pause_bot - Pausiert den Trading-Bot\n"
-            "/resume_bot - Setzt den Trading-Bot fort\n\n"
-            
-            "*Admin-Befehle:*\n"
-            "/restart - Startet den Trading-Bot neu\n"
-            "/process_transcript - Verarbeitet ein Transkript"
-        )
+    help_text = (
+        "🤖 *Gemma Trading Bot - Hilfe*\n\n"
+        "*Basis-Befehle:*\n"
+        "/start - Startet den Bot\n"
+        "/help - Zeigt diese Hilfe an\n"
+        "/status - Zeigt den aktuellen Status des Trading-Bots\n\n"
+        
+        "*Trading-Informationen:*\n"
+        "/balance - Zeigt den aktuellen Kontostand\n"
+        "/positions - Zeigt offene Positionen\n"
+        "/performance - Zeigt Performance-Metriken\n\n"
+        
+        "*Marktdaten & Berichte:*\n"
+        "/price [Symbol] - Aktueller Preis (z.B. /price BTC)\n"
+        "/chart [Symbol] [Zeitraum] - Zeigt ein Preisdiagramm\n"
+        "/news [Thema] - Aktuelle Krypto-/Börsennachrichten\n"
+        "/daily_report - Täglicher Zusammenfassungsbericht\n\n"
+        
+        "*Bot-Steuerung:*\n"
+        "/start_bot - Startet den Trading-Bot\n"
+        "/stop_bot - Stoppt den Trading-Bot\n"
+        "/pause_bot - Pausiert den Trading-Bot\n"
+        "/resume_bot - Setzt den Trading-Bot fort\n\n"
+        
+        "*Admin-Befehle:*\n"
+        "/restart - Startet den Trading-Bot neu\n"
+        "/process_transcript - Verarbeitet ein Transkript"
+    )
 
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
     async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
         """Handler für den /status Befehl."""
