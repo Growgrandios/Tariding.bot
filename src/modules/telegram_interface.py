@@ -1726,5 +1726,9 @@ class TelegramInterface:
             transcripts = []
             
             # Suche nach Transkriptdateien
-            for file_path in sorted(self.transcript_dir.glob('transcript_*.txt'), reverse=True):
-                if len(transcripts) >= limit:
+             def _get_recent_transcripts(self, limit: int = 5) -> List[Dict[str, Any]]:
+        # ... Ihre Implementierung ...
+
+    # Weitere Methoden hier (falls vorhanden)
+
+# Ende der Klasse TelegramInterface  <-- Dies fehlt
