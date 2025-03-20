@@ -154,11 +154,14 @@ class DataPipeline:
         # ProRealTime für Backtesting und Paper-Trading.
         try:
             if all(self.api_keys.get('prorealtime', {}).values()):
-                from src.modules.prorealtime_connector import ProRealTimeConnector  # Import hier benötigt.
-                self.sources['prorealtime'] = ProRealTimeConnector(
-                    credentials=self.api_keys['prorealtime']
-                )
-                self.logger.info("ProRealTime API erfolgreich initialisiert.")
+                try:
+                    from src.modules.prorealtime_connector import ProRealTimeConnector  # Import hier benötigt.
+                    self.sources['prorealtime'] = ProRealTimeConnector(
+                        credentials=self.api_keys['prorealtime']
+                    )
+                    self.logger.info("ProRealTime API erfolgreich initialisiert.")
+                except ImportError:
+                    self.logger.warning("ProRealTime-Modul nicht gefunden. ProRealTime-Features werden deaktiviert.")
             else:
                 self.logger.warning("ProRealTime API nicht initialisiert (keine Zugangsdaten).")
         except Exception as e:
