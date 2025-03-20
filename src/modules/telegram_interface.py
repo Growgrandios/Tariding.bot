@@ -365,42 +365,38 @@ class TelegramInterface:
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
-   async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler für den /help Befehl."""
-    if not self._check_authorized(update):
-        await update.message.reply_text("⛔ Du bist nicht autorisiert, diesen Bot zu verwenden.")
-        return
-
-    help_text = (
-        "🤖 *Gemma Trading Bot - Hilfe*\n\n"
-        "*Basis-Befehle:*\n"
-        "/start - Startet den Bot\n"
-        "/help - Zeigt diese Hilfe an\n"
-        "/status - Zeigt den aktuellen Status des Trading-Bots\n\n"
+    async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler für den /help Befehl."""
+        if not self._check_authorized(update):
+            await update.message.reply_text("⛔ Du bist nicht autorisiert, diesen Bot zu verwenden.")
+            return
         
-        "*Trading-Informationen:*\n"
-        "/balance - Zeigt den aktuellen Kontostand\n"
-        "/positions - Zeigt offene Positionen\n"
-        "/performance - Zeigt Performance-Metriken\n\n"
+        help_text = (
+            "🤖 *Gemma Trading Bot - Hilfe*\n\n"
+            "*Basis-Befehle:*\n"
+            "/start - Startet den Bot\n"
+            "/help - Zeigt diese Hilfe an\n"
+            "/status - Zeigt den aktuellen Status des Trading-Bots\n\n"
+            "*Trading-Informationen:*\n"
+            "/balance - Zeigt den aktuellen Kontostand\n"
+            "/positions - Zeigt offene Positionen\n"
+            "/performance - Zeigt Performance-Metriken\n\n"
+            "*Marktdaten & Berichte:*\n"
+            "/price [Symbol] - Aktueller Preis (z.B. /price BTC)\n"
+            "/chart [Symbol] [Zeitraum] - Zeigt ein Preisdiagramm\n"
+            "/news [Thema] - Aktuelle Krypto-/Börsennachrichten\n"
+            "/daily_report - Täglicher Zusammenfassungsbericht\n\n"
+            "*Bot-Steuerung:*\n"
+            "/start_bot - Startet den Trading-Bot\n"
+            "/stop_bot - Stoppt den Trading-Bot\n"
+            "/pause_bot - Pausiert den Trading-Bot\n"
+            "/resume_bot - Setzt den Trading-Bot fort\n\n"
+            "*Admin-Befehle:*\n"
+            "/restart - Startet den Trading-Bot neu\n"
+            "/process_transcript - Verarbeitet ein Transkript"
+        )
         
-        "*Marktdaten & Berichte:*\n"
-        "/price [Symbol] - Aktueller Preis (z.B. /price BTC)\n"
-        "/chart [Symbol] [Zeitraum] - Zeigt ein Preisdiagramm\n"
-        "/news [Thema] - Aktuelle Krypto-/Börsennachrichten\n"
-        "/daily_report - Täglicher Zusammenfassungsbericht\n\n"
-        
-        "*Bot-Steuerung:*\n"
-        "/start_bot - Startet den Trading-Bot\n"
-        "/stop_bot - Stoppt den Trading-Bot\n"
-        "/pause_bot - Pausiert den Trading-Bot\n"
-        "/resume_bot - Setzt den Trading-Bot fort\n\n"
-        
-        "*Admin-Befehle:*\n"
-        "/restart - Startet den Trading-Bot neu\n"
-        "/process_transcript - Verarbeitet ein Transkript"
-    )
-
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
     async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
         """Handler für den /status Befehl."""
@@ -408,6 +404,7 @@ class TelegramInterface:
             query = update.callback_query
             chat_id = query.message.chat_id
             message_id = query.message.message_id
+            
             if not self._check_authorized(update):
                 await self.bot.edit_message_text(
                     chat_id=chat_id,
@@ -457,6 +454,7 @@ class TelegramInterface:
                         InlineKeyboardButton("⏹ Stoppen", callback_data="stop_bot")
                     ]
                 ]
+                
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
                 if is_callback:
@@ -475,6 +473,7 @@ class TelegramInterface:
                     )
             else:
                 message = "⚠️ Kann Status nicht abrufen - MainController nicht verfügbar"
+                
                 if is_callback:
                     await self.bot.edit_message_text(
                         chat_id=chat_id,
@@ -483,9 +482,11 @@ class TelegramInterface:
                     )
                 else:
                     await update.message.reply_text(message)
+        
         except Exception as e:
             self.logger.error(f"Fehler beim Status-Abruf: {str(e)}")
             error_message = f"❌ Fehler beim Abrufen des Status: {str(e)}"
+            
             if is_callback:
                 await self.bot.edit_message_text(
                     chat_id=chat_id,
@@ -501,6 +502,7 @@ class TelegramInterface:
             query = update.callback_query
             chat_id = query.message.chat_id
             message_id = query.message.message_id
+            
             if not self._check_authorized(update):
                 await self.bot.edit_message_text(
                     chat_id=chat_id,
@@ -573,7 +575,7 @@ class TelegramInterface:
                                 for bar in bars:
                                     height = bar.get_height()
                                     plt.text(bar.get_x() + bar.get_width()/2., height + 0.05,
-                                            f'{height:.2f}', ha='center', va='bottom')
+                                             f'{height:.2f}', ha='center', va='bottom')
                                 
                                 # Speichere Diagramm in Puffer
                                 buf = io.BytesIO()
@@ -589,6 +591,7 @@ class TelegramInterface:
                                     chat_id=(chat_id if is_callback else update.effective_chat.id),
                                     photo=buf
                                 )
+                                
                                 return
                         except Exception as chart_error:
                             self.logger.error(f"Fehler beim Erstellen des Kontostand-Diagramms: {str(chart_error)}")
@@ -601,6 +604,7 @@ class TelegramInterface:
                     )
             else:
                 message = "⚠️ Kann Kontostand nicht abrufen - MainController nicht verfügbar"
+                
                 if is_callback:
                     await self.bot.edit_message_text(
                         chat_id=chat_id,
@@ -609,9 +613,11 @@ class TelegramInterface:
                     )
                 else:
                     await update.message.reply_text(message)
+        
         except Exception as e:
             self.logger.error(f"Fehler beim Kontostand-Abruf: {str(e)}")
             error_message = f"❌ Fehler beim Abrufen des Kontostands: {str(e)}"
+            
             if is_callback:
                 await self.bot.edit_message_text(
                     chat_id=chat_id,
