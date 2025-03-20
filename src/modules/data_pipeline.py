@@ -310,4 +310,5 @@ class DataPipeline:
                         self.data_cache['stocks'][symbol] = symbol_data
                         self.logger.info(f"Fallback-Daten für {symbol} von Alpha Vantage verwendet")
                     except Exception as fallback_error:
-                        self.logger.error(f"Alpha Vantage Fallback fehlgeschlagen
+                     self.logger.error(f"Alpha Vantage Fallback fehlgeschlagen")
+
