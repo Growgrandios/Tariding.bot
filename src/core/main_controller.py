@@ -1,5 +1,3 @@
-# main_controller.py
-
 import os
 import sys
 import logging
@@ -54,21 +52,24 @@ class MainController:
     Koordiniert und verwaltet alle Module und steuert den Gesamtbetrieb.
     """
     
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_manager=None):
         """
         Initialisiert den MainController.
-        
+
         Args:
-            config_path: Pfad zur Konfigurationsdatei (optional)
+            config_manager: Ein ConfigManager-Objekt für die Konfigurationsverwaltung (optional)
         """
         self.logger = logging.getLogger("MainController")
         self.logger.info("Initialisiere MainController...")
         
+        # Verwende den übergebenen ConfigManager
+        self.config_manager = config_manager
+
         # Bot-Status
         self.state = BotState.INITIALIZING
         self.previous_state = None
         self.emergency_mode = False
-        
+
         # Ereignisprotokollierung
         self.events = []
         self.max_events = 1000  # Maximale Anzahl der gespeicherten Ereignisse
@@ -96,7 +97,7 @@ class MainController:
         self.module_status = {}
         
         # Config Manager initialisieren (als erstes, da andere Module davon abhängen)
-        self.config_manager = ConfigManager(config_path)
+        self.config_manager = config_manager
         
         # Konfiguration laden
         self.config = self.config_manager.get_config()
@@ -150,14 +151,14 @@ class MainController:
             self.learning_module = LearningModule(learning_config)
             self.modules['learning_module'] = self.learning_module
             self.module_status['learning_module'] = {"status": "initialized", "errors": []}
-            
+
             # Black Swan Detector
             self.logger.info("Initialisiere BlackSwanDetector...")
             blackswan_config = self.config_manager.get_config('black_swan_detector')
             self.black_swan_detector = BlackSwanDetector(blackswan_config)
             self.modules['black_swan_detector'] = self.black_swan_detector
             self.module_status['black_swan_detector'] = {"status": "initialized", "errors": []}
-            
+
             # Telegram Interface
             self.logger.info("Initialisiere TelegramInterface...")
             telegram_config = self.config_manager.get_config('telegram')
@@ -191,13 +192,18 @@ class MainController:
             self.logger.error(traceback.format_exc())
             self.state = BotState.ERROR
             raise
-    
+
     def _connect_modules(self):
-        """Verbindet die Module miteinander für Kommunikation und Datenaustausch."""
+        """
+        Verbindet die Module miteinander für Kommunikation und Datenaustausch.
+        Dummy-Implementierung: Falls noch keine speziellen Verbindungen notwendig sind, wird dies protokolliert.
+        """
         try:
-            # Black Swan Detector mit Live Trading verbinden
+            self.logger.info("Dummy _connect_modules aufgerufen.")
+            # Black Swan Detector verbinden
             self.black_swan_detector.register_notification_callback(self._handle_black_swan_event)
-            
+            self.black_swan_detector.data_pipeline = self.data_pipeline
+
             # Telegram Interface Callbacks registrieren
             telegram_commands = {
                 'start': self.start,
@@ -209,26 +215,19 @@ class MainController:
                 'process_transcript': self._process_transcript_command
             }
             self.telegram_interface.register_commands(telegram_commands)
-            
+
             # Live Trading Error-Callbacks registrieren
             self.live_trading.register_error_callback(self._handle_trading_error)
             self.live_trading.register_order_update_callback(self._handle_order_update)
             self.live_trading.register_position_update_callback(self._handle_position_update)
-            
-            # Learning Module mit Data Pipeline verbinden
-            # Das Learning Module verwendet direkt die DataPipeline für Daten
-            
+
             # Tax Module mit Live Trading verbinden
-            # Bei realen Trades Tax-Modul informieren
             self.live_trading.register_order_update_callback(self.tax_module.process_trade)
-            
+
             self.logger.info("Alle Module erfolgreich verbunden")
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Verbinden der Module: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            self.state = BotState.ERROR
-            raise
+            raise    
     
     def start(self, auto_trade: bool = True):
         """
@@ -295,8 +294,8 @@ class MainController:
             self._add_event("system", "Bot gestartet", {"auto_trade": auto_trade})
             
             # Bot-Start-Benachrichtigung senden
-            self._send_notification("Bot gestartet", 
-                                   f"Trading-Modus: {'Aktiviert' if auto_trade else 'Deaktiviert'}")
+            self._send_notification("Bot gestartet",
+                                    f"Trading-Modus: {'Aktiviert' if auto_trade else 'Deaktiviert'}")
             
             return True
             
