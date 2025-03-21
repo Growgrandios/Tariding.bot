@@ -50,7 +50,7 @@ class TelegramInterface:
         # API-Konfiguration
         self.bot_token = config.get('bot_token', os.getenv('TELEGRAM_BOT_TOKEN', ''))
         
-        # String oder Liste von IDs in Integer-Liste konvertieren
+        # String oder Liste von IDs in Integer konvertieren
         allowed_users_raw = config.get('allowed_users', [])
         if isinstance(allowed_users_raw, str):
             # String von kommagetrennten IDs parsen
@@ -187,22 +187,16 @@ class TelegramInterface:
         data = query.data
         
         if data.startswith("refresh_status"):
-            # Status aktualisieren
             await self._status_command(update, context, is_callback=True)
         elif data.startswith("refresh_balance"):
-            # Kontostand aktualisieren
             await self._balance_command(update, context, is_callback=True)
         elif data.startswith("refresh_positions"):
-            # Positionen aktualisieren
             await self._positions_command(update, context, is_callback=True)
         elif data.startswith("start_bot"):
-            # Bot starten
             await self._start_bot_command(update, context, is_callback=True)
         elif data.startswith("stop_bot"):
-            # Bot stoppen
             await self._stop_bot_command(update, context, is_callback=True)
         elif data.startswith("chart_timeframe"):
-            # Chart-Zeitrahmen ändern
             parts = data.split(":")
             if len(parts) >= 3:
                 symbol = parts[1]
@@ -233,7 +227,6 @@ class TelegramInterface:
             return False
         
         try:
-            # Thread für Bot-Polling starten
             self.bot_thread = threading.Thread(target=self._run_bot)
             self.bot_thread.daemon = True
             self.bot_thread.start()
@@ -241,7 +234,6 @@ class TelegramInterface:
             self.is_running = True
             self.logger.info("Telegram-Bot erfolgreich gestartet")
             
-            # Sende Startup-Nachricht an alle erlaubten Benutzer
             startup_message = "🤖 Trading Bot wurde gestartet und ist bereit für Befehle.\nVerwende /help für eine Liste der verfügbaren Befehle."
             self._broadcast_message(startup_message)
             
@@ -257,13 +249,11 @@ class TelegramInterface:
             return False
         
         try:
-            # Bot-Polling beenden
             if self.application:
                 self.application.stop()
             
             self.is_running = False
             
-            # Warten, bis der Thread beendet ist
             if self.bot_thread and self.bot_thread.is_alive():
                 self.bot_thread.join(timeout=10)
             
@@ -277,12 +267,8 @@ class TelegramInterface:
         """Führt den Bot-Polling-Loop aus."""
         try:
             self.logger.info("Starte Telegram-Bot-Polling...")
-            
-            # Event-Loop für diesen Thread erstellen
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
-            # Polling starten
             loop.run_until_complete(self.application.run_polling(allowed_updates=Update.ALL_TYPES))
         except Exception as e:
             self.logger.error(f"Fehler im Bot-Polling-Loop: {str(e)}")
@@ -303,7 +289,6 @@ class TelegramInterface:
             return False
         
         user_id = update.effective_user.id
-        
         if user_id in self.allowed_users:
             return True
         
@@ -333,7 +318,7 @@ class TelegramInterface:
             except Exception as e:
                 self.logger.error(f"Fehler beim Senden der Broadcast-Nachricht an {user_id}: {str(e)}")
 
-      async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler für den /start Befehl."""
         if not self._check_authorized(update):
             await update.message.reply_text("⛔ Du bist nicht autorisiert, diesen Bot zu verwenden.")
@@ -360,7 +345,6 @@ class TelegramInterface:
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(welcome_message, reply_markup=reply_markup)
-
 
     async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler für den /help Befehl."""
@@ -406,8 +390,6 @@ class TelegramInterface:
         try:
             if self.main_controller and hasattr(self.main_controller, 'get_status'):
                 status = self.main_controller.get_status()
-                
-                # Formatierte Statusnachricht erstellen
                 message = (
                     f"📊 *Trading Bot Status*\n\n"
                     f"🔄 *Status*: {status.get('state', 'Unbekannt')}\n"
@@ -415,13 +397,10 @@ class TelegramInterface:
                     f"⏱ *Uptime*: {status.get('uptime', 'Unbekannt')}\n\n"
                     f"📦 *Module*:\n"
                 )
-                
-                # Module-Status
                 for module, module_status in status.get('modules', {}).items():
                     status_emoji = "✅" if module_status.get('status') == "running" else "⏸" if module_status.get('status') == "paused" else "⛔"
                     message += f" {status_emoji} {module}: {module_status.get('status', 'Unbekannt')}\n"
                 
-                # Letzte Ereignisse
                 events = status.get('events', [])
                 if events:
                     message += "\n🔍 *Letzte Ereignisse*:\n"
@@ -429,7 +408,6 @@ class TelegramInterface:
                         event_time = datetime.fromisoformat(event.get('timestamp', '')).strftime('%H:%M:%S')
                         message += f" • {event_time} - {event.get('type', 'Unbekannt')}: {event.get('title', 'Kein Titel')}\n"
                 
-                # Inline-Keyboard für Aktionen
                 keyboard = [
                     [
                         InlineKeyboardButton("🔄 Aktualisieren", callback_data="refresh_status"),
@@ -508,7 +486,6 @@ class TelegramInterface:
                     status_message = await update.message.reply_text("🔄 Rufe Kontostand ab...")
                 
                 balance_data = self.main_controller._get_account_balance()
-                
                 if balance_data.get('status') == 'success':
                     balance = balance_data.get('balance', {})
                     message = "💰 *Kontostand*\n\n"
@@ -621,7 +598,6 @@ class TelegramInterface:
                     status_message = await update.message.reply_text("🔄 Rufe offene Positionen ab...")
                 
                 positions_data = self.main_controller._get_open_positions()
-                
                 if positions_data.get('status') == 'success':
                     positions = positions_data.get('positions', [])
                     
@@ -1102,13 +1078,11 @@ class TelegramInterface:
                 
                 if news:
                     message = f"📰 *Aktuelle {topic or 'Krypto'}-Nachrichten*\n\n"
-                    
                     for i, article in enumerate(news[:5], 1):
                         title = article.get('title', 'Kein Titel')
                         source = article.get('source', {}).get('name', 'Unbekannte Quelle')
                         url = article.get('url', '#')
                         date = datetime.fromisoformat(article.get('publishedAt', datetime.now().isoformat()).replace('Z', '+00:00'))
-                        
                         message += f"{i}. *{title}*\n"
                         message += f"   Quelle: {source} | {date.strftime('%d.%m.%Y %H:%M')}\n\n"
                     
@@ -1132,22 +1106,18 @@ class TelegramInterface:
             
             if self.main_controller:
                 report_data = {}
-                
                 if hasattr(self.main_controller, '_get_performance_metrics'):
                     metrics_data = self.main_controller._get_performance_metrics()
                     if metrics_data.get('status') == 'success':
                         report_data['metrics'] = metrics_data.get('metrics', {})
-                
                 if hasattr(self.main_controller, '_get_account_balance'):
                     balance_data = self.main_controller._get_account_balance()
                     if balance_data.get('status') == 'success':
                         report_data['balance'] = balance_data.get('balance', {})
-                
                 if hasattr(self.main_controller, '_get_open_positions'):
                     positions_data = self.main_controller._get_open_positions()
                     if positions_data.get('status') == 'success':
                         report_data['positions'] = positions_data.get('positions', [])
-                
                 if hasattr(self.main_controller, '_get_today_trades'):
                     trades_data = self.main_controller._get_today_trades()
                     if trades_data.get('status') == 'success':
@@ -1155,38 +1125,29 @@ class TelegramInterface:
                 
                 now = datetime.now()
                 message = f"📋 *Täglicher Bericht - {now.strftime('%d.%m.%Y')}*\n\n"
-                
                 if 'balance' in report_data and report_data['balance'].get('total'):
                     message += "💰 *Kontostand:*\n"
-                    
                     for currency, amount in report_data['balance']['total'].items():
                         if float(amount) > 0:
                             message += f" • {currency}: {amount}\n"
-                    
                     message += "\n"
-                
                 if 'metrics' in report_data and 'trading' in report_data['metrics']:
                     trading = report_data['metrics']['trading']
                     daily_pnl = trading.get('daily_pnl', 0) * 100
                     win_rate = trading.get('win_rate', 0) * 100
-                    
                     emoji = "📈" if daily_pnl >= 0 else "📉"
                     message += f"{emoji} *Tages-Performance:* {daily_pnl:.2f}%\n"
                     message += f"🎯 *Gewinnrate:* {win_rate:.2f}%\n\n"
-                
                 if 'today_trades' in report_data:
                     today_trades = report_data['today_trades']
                     message += f"🔄 *Heutige Trades:* {len(today_trades)}\n"
-                    
                     if today_trades:
                         winning_trades = sum(1 for t in today_trades if t.get('pnl', 0) > 0)
                         losing_trades = sum(1 for t in today_trades if t.get('pnl', 0) < 0)
                         total_pnl = sum(t.get('pnl', 0) for t in today_trades)
-                        
                         message += f" • Gewinner: {winning_trades}\n"
                         message += f" • Verlierer: {losing_trades}\n"
                         message += f" • Gesamt-PnL: {total_pnl:.2f}\n\n"
-                        
                         try:
                             trade_data = []
                             for trade in today_trades:
@@ -1196,13 +1157,10 @@ class TelegramInterface:
                                     'side': trade.get('side', 'Unbekannt'),
                                     'time': datetime.fromisoformat(trade.get('timestamp', ''))
                                 })
-                            
                             if trade_data:
                                 trade_data.sort(key=lambda x: x['time'])
                                 df = pd.DataFrame(trade_data)
-                                
                                 plt.figure(figsize=(12, 10))
-                                
                                 plt.subplot(2, 1, 1)
                                 bars = plt.bar(range(len(df)), df['pnl'],
                                              color=['green' if pnl > 0 else 'red' for pnl in df['pnl']])
@@ -1210,13 +1168,11 @@ class TelegramInterface:
                                 plt.xlabel('Trade Nr.')
                                 plt.ylabel('PnL')
                                 plt.xticks(range(len(df)), [f"{i+1}" for i in range(len(df))])
-                                
                                 for i, bar in enumerate(bars):
                                     height = bar.get_height()
                                     plt.text(bar.get_x() + bar.get_width()/2., 
                                              0.05 if height < 0 else height + 0.05,
                                              f'{height:.2f}', ha='center', va='bottom')
-                                
                                 plt.subplot(2, 1, 2)
                                 cumulative_pnl = df['pnl'].cumsum()
                                 plt.plot(range(len(df)), cumulative_pnl, 'b-o', linewidth=2)
@@ -1225,80 +1181,59 @@ class TelegramInterface:
                                 plt.ylabel('Kumulativer PnL')
                                 plt.xticks(range(len(df)), [f"{i+1}" for i in range(len(df))])
                                 plt.grid(True, alpha=0.3)
-                                
                                 plt.annotate(f"{cumulative_pnl.iloc[-1]:.2f}", 
                                              xy=(len(df)-1, cumulative_pnl.iloc[-1]),
                                              xytext=(len(df)-1, cumulative_pnl.iloc[-1] + 0.5),
                                              arrowprops=dict(facecolor='black', shrink=0.05))
-                                
                                 plt.tight_layout()
-                                
                                 buf = io.BytesIO()
                                 plt.savefig(buf, format='png')
                                 buf.seek(0)
                                 plt.close()
-                                
                                 await status_message.edit_text(message, parse_mode=ParseMode.MARKDOWN)
-                                
                                 await self.bot.send_photo(
                                     chat_id=update.effective_chat.id,
                                     photo=buf,
                                     caption=f"Trading-Performance am {now.strftime('%d.%m.%Y')}"
                                 )
-                                
                                 rest_message = ""
-                                
                                 if 'positions' in report_data:
                                     positions = report_data['positions']
                                     rest_message += f"📊 *Offene Positionen:* {len(positions)}\n"
-                                    
                                     if positions:
                                         for pos in positions[:3]:
                                             symbol = pos.get('symbol', 'Unbekannt')
                                             side = pos.get('side', 'Unbekannt')
                                             side_emoji = "🟢" if side == 'long' else "🔴"
                                             unrealized_pnl = pos.get('unrealizedPnl', 0)
-                                            
                                             rest_message += f" • {side_emoji} {symbol}: {unrealized_pnl}\n"
-                                        
                                         if len(positions) > 3:
                                             rest_message += f" • ... und {len(positions) - 3} weitere\n"
-                                        
                                         rest_message += "\n"
-                                
                                 rest_message += "📱 Verwende /status oder /positions für mehr Details."
-                                
                                 if rest_message:
                                     await self.bot.send_message(
                                         chat_id=update.effective_chat.id,
                                         text=rest_message,
                                         parse_mode=ParseMode.MARKDOWN
                                     )
-                                
                                 return
                         except Exception as chart_error:
                             self.logger.error(f"Fehler beim Erstellen des Tagesberichts-Diagramms: {str(chart_error)}")
-                
                 if 'positions' in report_data:
                     positions = report_data['positions']
                     message += f"📊 *Offene Positionen:* {len(positions)}\n"
-                    
                     if positions:
                         for pos in positions[:3]:
                             symbol = pos.get('symbol', 'Unbekannt')
                             side = pos.get('side', 'Unbekannt')
                             side_emoji = "🟢" if side == 'long' else "🔴"
                             unrealized_pnl = pos.get('unrealizedPnl', 0)
-                            
                             message += f" • {side_emoji} {symbol}: {unrealized_pnl}\n"
-                        
                         if len(positions) > 3:
                             message += f" • ... und {len(positions) - 3} weitere\n"
-                        
                         message += "\n"
-                
                 message += "📱 Verwende /status oder /positions für mehr Details."
-                
                 await status_message.edit_text(message, parse_mode=ParseMode.MARKDOWN)
             else:
                 await update.message.reply_text("⚠️ Kann Bericht nicht erstellen - MainController nicht verfügbar")
@@ -1342,13 +1277,11 @@ class TelegramInterface:
                         auto_trade = False
                 
                 success = self.main_controller.start(auto_trade=auto_trade)
-                
                 if success:
                     message = (
                         f"✅ Trading Bot erfolgreich gestartet!\n"
                         f"Auto-Trading: {'Aktiviert' if auto_trade else 'Deaktiviert'}"
                     )
-                    
                     if is_callback:
                         await status_message.edit_text(message)
                     else:
@@ -1411,7 +1344,6 @@ class TelegramInterface:
                     status_message = await update.message.reply_text("🔄 Stoppe Trading Bot...")
                 
                 success = self.main_controller.stop()
-                
                 if success:
                     message = "✅ Trading Bot erfolgreich gestoppt!"
                     if is_callback:
@@ -1456,7 +1388,6 @@ class TelegramInterface:
             if self.main_controller and hasattr(self.main_controller, 'pause'):
                 status_message = await update.message.reply_text("🔄 Pausiere Trading Bot...")
                 success = self.main_controller.pause()
-                
                 if success:
                     await status_message.edit_text("⏸ Trading Bot erfolgreich pausiert!")
                 else:
@@ -1477,7 +1408,6 @@ class TelegramInterface:
             if self.main_controller and hasattr(self.main_controller, 'resume'):
                 status_message = await update.message.reply_text("🔄 Setze Trading Bot fort...")
                 success = self.main_controller.resume()
-                
                 if success:
                     await status_message.edit_text("▶️ Trading Bot erfolgreich fortgesetzt!")
                 else:
@@ -1498,7 +1428,6 @@ class TelegramInterface:
             if self.main_controller and hasattr(self.main_controller, 'restart'):
                 status_message = await update.message.reply_text("🔄 Starte Trading Bot neu...")
                 success = self.main_controller.restart()
-                
                 if success:
                     await status_message.edit_text("✅ Trading Bot erfolgreich neu gestartet!")
                 else:
@@ -1518,16 +1447,13 @@ class TelegramInterface:
         try:
             if not context.args or len(context.args) == 0:
                 recent_transcripts = self._get_recent_transcripts()
-                
                 if not recent_transcripts:
                     await update.message.reply_text(
                         "⚠️ Bitte gib einen Transkript-Pfad an oder zeichne erst ein Transkript auf.\n"
                         "Beispiel: /process_transcript data/transcripts/transcript_20230101.txt"
                     )
                     return
-                
                 transcript_path = recent_transcripts[0]['path']
-                
                 await update.message.reply_text(
                     f"ℹ️ Verwende das neueste Transkript: {transcript_path}\n"
                     f"Starte Verarbeitung..."
@@ -1539,7 +1465,6 @@ class TelegramInterface:
                 status_message = await update.message.reply_text(f"🔄 Verarbeite Transkript: {transcript_path}...")
                 params = {'path': transcript_path}
                 result = self.main_controller._process_transcript_command(params)
-                
                 if result.get('status') == 'success':
                     await status_message.edit_text(
                         f"✅ Transkript erfolgreich verarbeitet!\n\n"
@@ -1560,7 +1485,7 @@ class TelegramInterface:
         """Handler für normale Nachrichten (für Transkript-Aufzeichnung)."""
         if not self._check_authorized(update):
             return
-        
+
     def _get_recent_transcripts(self, limit: int = 5) -> List[Dict[str, Any]]:
         """
         Gibt eine Liste der zuletzt aufgezeichneten Transkripte zurück.
