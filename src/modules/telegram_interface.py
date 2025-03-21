@@ -333,7 +333,7 @@ class TelegramInterface:
             except Exception as e:
                 self.logger.error(f"Fehler beim Senden der Broadcast-Nachricht an {user_id}: {str(e)}")
 
-    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+      async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler für den /start Befehl."""
         if not self._check_authorized(update):
             await update.message.reply_text("⛔ Du bist nicht autorisiert, diesen Bot zu verwenden.")
@@ -360,6 +360,7 @@ class TelegramInterface:
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(welcome_message, reply_markup=reply_markup)
+
 
     async def _help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler für den /help Befehl."""
