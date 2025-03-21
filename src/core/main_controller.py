@@ -1,3 +1,5 @@
+# main_controller.py
+
 import os
 import sys
 import logging
@@ -11,8 +13,6 @@ import traceback
 import signal
 import importlib
 import queue
-
-# Internes Event-System für Modulkommunikation
 from concurrent.futures import ThreadPoolExecutor
 
 # Module importieren
@@ -25,15 +25,8 @@ from src.modules.black_swan_detector import BlackSwanDetector
 from src.modules.telegram_interface import TelegramInterface
 from src.modules.tax_module import TaxModule
 
-# Konfiguration des Loggings
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("logs/main_controller.log"),
-        logging.StreamHandler()
-    ]
-)
+# Logger einrichten (ohne basicConfig, da dies bereits in main.py erfolgt)
+logger = logging.getLogger("MainController")
 
 class BotState:
     """Status des Trading Bots"""
@@ -55,7 +48,7 @@ class MainController:
     def __init__(self, config_manager=None):
         """
         Initialisiert den MainController.
-
+        
         Args:
             config_manager: Ein ConfigManager-Objekt für die Konfigurationsverwaltung (optional)
         """
@@ -64,12 +57,12 @@ class MainController:
         
         # Verwende den übergebenen ConfigManager
         self.config_manager = config_manager
-
+        
         # Bot-Status
         self.state = BotState.INITIALIZING
         self.previous_state = None
         self.emergency_mode = False
-
+        
         # Ereignisprotokollierung
         self.events = []
         self.max_events = 1000  # Maximale Anzahl der gespeicherten Ereignisse
@@ -96,38 +89,45 @@ class MainController:
         self.modules = {}
         self.module_status = {}
         
-        # Config Manager initialisieren (als erstes, da andere Module davon abhängen)
-        self.config_manager = config_manager
-        
         # Konfiguration laden
-        self.config = self.config_manager.get_config()
-        
-        # Log-Level anpassen
-        log_level = self.config.get('general', {}).get('log_level', 'INFO')
-        logging.getLogger().setLevel(getattr(logging, log_level))
-        
-        # Pfade
-        self.data_path = Path(self.config.get('general', {}).get('data_path', 'data'))
-        self.data_path.mkdir(parents=True, exist_ok=True)
-        
-        # Module initialisieren
-        self._initialize_modules()
-        
-        # Status auf bereit setzen
-        self.state = BotState.READY
-        self.logger.info("MainController erfolgreich initialisiert")
+        if self.config_manager:
+            self.config = self.config_manager.get_config()
+            
+            # Log-Level anpassen
+            log_level = self.config.get('general', {}).get('log_level', 'INFO')
+            logging.getLogger().setLevel(getattr(logging, log_level))
+            
+            # Pfade
+            self.data_path = Path(self.config.get('general', {}).get('data_path', 'data'))
+            self.data_path.mkdir(parents=True, exist_ok=True)
+            
+            # Module initialisieren
+            self._initialize_modules()
+            
+            # Status auf bereit setzen
+            self.state = BotState.READY
+            self.logger.info("MainController erfolgreich initialisiert")
+        else:
+            self.logger.error("Kein ConfigManager übergeben, MainController nicht vollständig initialisiert")
+            self.config = {}
+            self.data_path = Path('data')
+            self.data_path.mkdir(parents=True, exist_ok=True)
+            self.state = BotState.ERROR
     
     def _signal_handler(self, sig, frame):
         """Behandelt Betriebssystem-Signale für sauberes Herunterfahren."""
         self.logger.info(f"Signal {sig} empfangen. Fahre Bot herunter...")
         self.shutdown_requested = True
-        
         if self.state == BotState.RUNNING:
             self.stop()
     
     def _initialize_modules(self):
         """Initialisiert alle Module des Trading Bots."""
         try:
+            # Dictionary zum Speichern der Module
+            self.modules = {}
+            self.module_status = {}
+            
             # Datenpipeline
             self.logger.info("Initialisiere DataPipeline...")
             data_config = self.config_manager.get_config('data_pipeline')
@@ -151,14 +151,14 @@ class MainController:
             self.learning_module = LearningModule(learning_config)
             self.modules['learning_module'] = self.learning_module
             self.module_status['learning_module'] = {"status": "initialized", "errors": []}
-
+            
             # Black Swan Detector
             self.logger.info("Initialisiere BlackSwanDetector...")
             blackswan_config = self.config_manager.get_config('black_swan_detector')
             self.black_swan_detector = BlackSwanDetector(blackswan_config)
             self.modules['black_swan_detector'] = self.black_swan_detector
             self.module_status['black_swan_detector'] = {"status": "initialized", "errors": []}
-
+            
             # Telegram Interface
             self.logger.info("Initialisiere TelegramInterface...")
             telegram_config = self.config_manager.get_config('telegram')
@@ -170,7 +170,7 @@ class MainController:
             
             # Transcript Processor
             self.logger.info("Initialisiere TranscriptProcessor...")
-            transcript_config = self.config_manager.get_config('transcript_processor')
+            transcript_config = self.config_manager.get_config('transcript_processor') or {}
             self.transcript_processor = TranscriptProcessor(transcript_config)
             self.modules['transcript_processor'] = self.transcript_processor
             self.module_status['transcript_processor'] = {"status": "initialized", "errors": []}
@@ -186,24 +186,18 @@ class MainController:
             self._connect_modules()
             
             self.logger.info("Alle Module erfolgreich initialisiert")
-            
         except Exception as e:
             self.logger.error(f"Fehler bei der Initialisierung der Module: {str(e)}")
             self.logger.error(traceback.format_exc())
             self.state = BotState.ERROR
             raise
-
+    
     def _connect_modules(self):
-        """
-        Verbindet die Module miteinander für Kommunikation und Datenaustausch.
-        Dummy-Implementierung: Falls noch keine speziellen Verbindungen notwendig sind, wird dies protokolliert.
-        """
+        """Verbindet die Module miteinander für Kommunikation und Datenaustausch."""
         try:
-            self.logger.info("Dummy _connect_modules aufgerufen.")
-            # Black Swan Detector verbinden
+            # Black Swan Detector mit Live Trading verbinden
             self.black_swan_detector.register_notification_callback(self._handle_black_swan_event)
-            self.black_swan_detector.data_pipeline = self.data_pipeline
-
+            
             # Telegram Interface Callbacks registrieren
             telegram_commands = {
                 'start': self.start,
@@ -215,25 +209,28 @@ class MainController:
                 'process_transcript': self._process_transcript_command
             }
             self.telegram_interface.register_commands(telegram_commands)
-
+            
             # Live Trading Error-Callbacks registrieren
             self.live_trading.register_error_callback(self._handle_trading_error)
             self.live_trading.register_order_update_callback(self._handle_order_update)
             self.live_trading.register_position_update_callback(self._handle_position_update)
-
+            
             # Tax Module mit Live Trading verbinden
             self.live_trading.register_order_update_callback(self.tax_module.process_trade)
-
+            
             self.logger.info("Alle Module erfolgreich verbunden")
         except Exception as e:
             self.logger.error(f"Fehler beim Verbinden der Module: {str(e)}")
-            raise    
+            self.logger.error(traceback.format_exc())
+            self.state = BotState.ERROR
+            raise
     
-    def start(self, auto_trade: bool = True):
+    def start(self, mode: str = None, auto_trade: bool = True):
         """
         Startet den Trading Bot.
         
         Args:
+            mode: Trading-Modus ('live', 'paper', 'backtest', 'learn')
             auto_trade: Ob automatisches Trading aktiviert werden soll
         
         Returns:
@@ -248,12 +245,11 @@ class MainController:
             return False
         
         try:
-            self.logger.info("Starte Trading Bot...")
+            self.logger.info(f"Starte Trading Bot im Modus '{mode}'...")
             self.previous_state = self.state
             self.state = BotState.RUNNING
             
             # Module starten
-            
             # Datenpipeline starten (für Marktdaten)
             self.data_pipeline.start_auto_updates()
             self.module_status['data_pipeline']['status'] = "running"
@@ -267,11 +263,13 @@ class MainController:
             self.module_status['telegram_interface']['status'] = "running"
             
             # Live Trading starten (falls aktiviert)
-            if auto_trade and self.config.get('trading', {}).get('mode', 'paper') != 'disabled':
-                if self.live_trading.is_ready:
-                    self.live_trading.start_trading()
+            current_mode = mode or self.config.get('trading', {}).get('mode', 'paper')
+            
+            if auto_trade and current_mode != 'disabled':
+                if hasattr(self.live_trading, 'is_ready') and self.live_trading.is_ready:
+                    self.live_trading.start_trading(mode=current_mode)
                     self.module_status['live_trading']['status'] = "running"
-                    self.logger.info("Live Trading aktiviert")
+                    self.logger.info(f"Live Trading aktiviert im Modus '{current_mode}'")
                 else:
                     self.logger.warning("Live Trading nicht bereit, Trading wird deaktiviert")
                     self.module_status['live_trading']['status'] = "disabled"
@@ -291,20 +289,62 @@ class MainController:
             self.logger.info("Trading Bot erfolgreich gestartet")
             
             # Event für Botstart hinzufügen
-            self._add_event("system", "Bot gestartet", {"auto_trade": auto_trade})
+            self._add_event("system", "Bot gestartet", {
+                "mode": mode, 
+                "auto_trade": auto_trade
+            })
             
             # Bot-Start-Benachrichtigung senden
-            self._send_notification("Bot gestartet",
-                                    f"Trading-Modus: {'Aktiviert' if auto_trade else 'Deaktiviert'}")
+            self._send_notification(
+                "Bot gestartet",
+                f"Modus: {current_mode}\nTrading: {'Aktiviert' if auto_trade else 'Deaktiviert'}"
+            )
             
             return True
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Starten des Bots: {str(e)}")
             self.logger.error(traceback.format_exc())
             self.state = BotState.ERROR
             self._add_event("error", "Fehler beim Botstart", {"error": str(e)})
             return False
+    
+    def train_models(self):
+        """
+        Trainiert die Modelle des Learning-Moduls.
+        
+        Returns:
+            True bei Erfolg, False bei Fehler
+        """
+        if not hasattr(self, 'learning_module'):
+            self.logger.error("Learning Module nicht initialisiert")
+            return False
+        
+        try:
+            self.logger.info("Starte Modelltraining...")
+            training_result = self.learning_module.train_all_models()
+            
+            # Event für Training hinzufügen
+            self._add_event("learning", "Modelltraining durchgeführt", training_result)
+            
+            self.logger.info(f"Modelltraining abgeschlossen: {training_result}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Fehler beim Modelltraining: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            self._add_event("error", "Fehler beim Modelltraining", {"error": str(e)})
+            return False
+    
+    def process_transcript(self, transcript_path: str):
+        """
+        Verarbeitet ein Transkript mit dem TranscriptProcessor.
+        
+        Args:
+            transcript_path: Pfad zum Transkript
+        
+        Returns:
+            Ergebnisdictionary der Transkriptverarbeitung
+        """
+        return self._process_transcript(transcript_path)
     
     def stop(self):
         """
@@ -323,7 +363,6 @@ class MainController:
             self.state = BotState.STOPPING
             
             # Module stoppen
-            
             # Live Trading stoppen
             if self.module_status['live_trading']['status'] == "running":
                 self.live_trading.stop_trading()
@@ -347,7 +386,6 @@ class MainController:
             # Telegram-Bot weiterlaufen lassen für Remote-Steuerung
             
             self.state = BotState.READY
-            
             self.logger.info("Trading Bot erfolgreich gestoppt")
             
             # Event für Botstopp hinzufügen
@@ -357,7 +395,6 @@ class MainController:
             self._send_notification("Bot gestoppt", "Trading-Aktivitäten wurden beendet")
             
             return True
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Stoppen des Bots: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -395,7 +432,6 @@ class MainController:
             self._send_notification("Bot pausiert", "Trading wurde pausiert, Überwachung bleibt aktiv")
             
             return True
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Pausieren des Bots: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -433,7 +469,6 @@ class MainController:
             self._send_notification("Bot fortgesetzt", "Trading wurde wieder aktiviert")
             
             return True
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Fortsetzen des Bots: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -462,7 +497,6 @@ class MainController:
             
             # Bot neu starten
             return self.start()
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Neustarten des Bots: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -497,7 +531,6 @@ class MainController:
                 
                 # Kurze Pause, um CPU-Last zu reduzieren
                 time.sleep(0.1)
-                
             except Exception as e:
                 self.logger.error(f"Fehler in der Hauptschleife: {str(e)}")
                 self.logger.error(traceback.format_exc())
@@ -513,7 +546,6 @@ class MainController:
             for _ in range(10):
                 try:
                     event = self.event_queue.get_nowait()
-                    
                     event_type = event.get('type')
                     event_data = event.get('data', {})
                     
@@ -534,10 +566,8 @@ class MainController:
                     
                     # Event als verarbeitet markieren
                     self.event_queue.task_done()
-                    
                 except queue.Empty:
                     break  # Queue ist leer
-                
         except Exception as e:
             self.logger.error(f"Fehler bei der Event-Verarbeitung: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -545,7 +575,6 @@ class MainController:
     def _monitor_loop(self):
         """Überwachungsschleife für Systemzustand und Modulstatus."""
         self.logger.info("Überwachungsschleife gestartet")
-        
         check_interval = 30  # Sekunden
         health_check_counter = 0
         
@@ -575,7 +604,6 @@ class MainController:
                     self._perform_health_check()
                 
                 time.sleep(check_interval)
-                
             except Exception as e:
                 self.logger.error(f"Fehler in der Überwachungsschleife: {str(e)}")
                 self.logger.error(traceback.format_exc())
@@ -593,26 +621,22 @@ class MainController:
                 # Spezifische Prüfungen je nach Modul
                 if module_name == 'data_pipeline':
                     # Prüfen, ob Daten aktuell sind
-                    last_update = self.data_pipeline.get_last_update_time('crypto')
-                    if last_update:
-                        time_diff = (datetime.datetime.now() - last_update).total_seconds()
-                        if time_diff > 300:  # Älter als 5 Minuten
-                            self.logger.warning(f"Daten für 'crypto' sind veraltet ({time_diff:.0f} Sekunden)")
+                    if hasattr(self.data_pipeline, 'get_last_update_time'):
+                        last_update = self.data_pipeline.get_last_update_time('crypto')
+                        if last_update:
+                            time_diff = (datetime.datetime.now() - last_update).total_seconds()
+                            if time_diff > 300:  # Älter als 5 Minuten
+                                self.logger.warning(f"Daten für 'crypto' sind veraltet ({time_diff:.0f} Sekunden)")
                 
                 elif module_name == 'live_trading':
                     # Prüfen, ob Verbindung zur Börse besteht
                     if self.module_status['live_trading']['status'] == "running":
-                        status = self.live_trading.get_status()
-                        if status.get('exchange_status') != 'connected':
-                            self.logger.warning(f"Live Trading nicht verbunden: {status.get('exchange_status')}")
-                
-                # Weitere modulspezifische Prüfungen könnten hier hinzugefügt werden
-            
-            # Systemressourcen prüfen (CPU, Speicher, etc.)
-            # In einer erweiterten Version könnten hier Ressourcenprüfungen hinzugefügt werden
+                        if hasattr(self.live_trading, 'get_status'):
+                            status = self.live_trading.get_status()
+                            if status.get('exchange_status') != 'connected':
+                                self.logger.warning(f"Live Trading nicht verbunden: {status.get('exchange_status')}")
             
             self.logger.debug("System-Health-Check abgeschlossen")
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Health-Check: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -676,8 +700,8 @@ class MainController:
             self.emergency_mode = True
             
             # Alle Positionen schließen
-            if (self.module_status['live_trading']['status'] == "running" and 
-                hasattr(self.live_trading, 'close_all_positions')):
+            if (self.module_status['live_trading']['status'] == "running" and
+                    hasattr(self.live_trading, 'close_all_positions')):
                 self.logger.critical("Schließe alle Positionen...")
                 try:
                     result = self.live_trading.close_all_positions()
@@ -686,8 +710,8 @@ class MainController:
                     self.logger.error(f"Fehler beim Schließen aller Positionen: {str(e)}")
             
             # Alle offenen Orders stornieren
-            if (self.module_status['live_trading']['status'] == "running" and 
-                hasattr(self.live_trading, 'cancel_all_orders')):
+            if (self.module_status['live_trading']['status'] == "running" and
+                    hasattr(self.live_trading, 'cancel_all_orders')):
                 self.logger.critical("Storniere alle offenen Orders...")
                 try:
                     result = self.live_trading.cancel_all_orders()
@@ -709,7 +733,6 @@ class MainController:
             
             # Event hinzufügen
             self._add_event("emergency", "Notfall-Shutdown", {"reason": reason})
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Notfall-Shutdown: {str(e)}")
             self.logger.error(traceback.format_exc())
@@ -737,7 +760,6 @@ class MainController:
         # Bei zu vielen aufeinanderfolgenden Fehlern Trading pausieren
         if consecutive_errors >= 5:
             self.logger.warning(f"Zu viele aufeinanderfolgende Fehler ({consecutive_errors}), pausiere Trading")
-            
             if self.state == BotState.RUNNING:
                 self.pause()
             
@@ -777,9 +799,9 @@ class MainController:
                 f"ID: {order_id}\nTyp: {side}\nMenge: {amount}\nPreis: {price}\nWert: {cost}",
                 priority="low"
             )
-            
-            # Ereignis zur Historie hinzufügen
-            self._add_event("order", f"Order {status}", order_data)
+        
+        # Ereignis zur Historie hinzufügen
+        self._add_event("order", f"Order {status}", order_data)
     
     def _handle_position_update(self, position_data: Dict[str, Any]):
         """
@@ -797,15 +819,41 @@ class MainController:
         if action == 'close':
             side = position_data.get('side', 'unknown')
             contracts_before = position_data.get('contracts_before', 0)
+            pnl = position_data.get('pnl', 0)
+            pnl_percent = position_data.get('pnl_percent', 0)
             
-            self._send_notification(
-                f"Position geschlossen: {symbol}",
-                f"Richtung: {side}\nKontrakte: {contracts_before}",
-                priority="normal"
+            message = (
+                f"Richtung: {side}\n"
+                f"Kontrakte: {contracts_before}\n"
+                f"PnL: {pnl:.2f} ({pnl_percent:.2f}%)"
             )
             
-            # Ereignis zur Historie hinzufügen
-            self._add_event("position", f"Position {action}", position_data)
+            # Priorität basierend auf Gewinn/Verlust
+            priority = "normal"
+            if pnl > 0:
+                title = f"Position mit Gewinn geschlossen: {symbol}"
+            else:
+                title = f"Position mit Verlust geschlossen: {symbol}"
+                if pnl_percent < -5:
+                    priority = "high"
+            
+            self._send_notification(title, message, priority=priority)
+        
+        # Bei neuen Positionen ebenfalls informieren
+        elif action == 'open':
+            side = position_data.get('side', 'unknown')
+            contracts = position_data.get('contracts', 0)
+            entry_price = position_data.get('entry_price', 0)
+            leverage = position_data.get('leverage', 1)
+            
+            self._send_notification(
+                f"Neue Position eröffnet: {symbol}",
+                f"Richtung: {side}\nKontrakte: {contracts}\nEinstiegspreis: {entry_price}\nHebel: {leverage}x",
+                priority="normal"
+            )
+        
+        # Ereignis zur Historie hinzufügen
+        self._add_event("position", f"Position {action}", position_data)
     
     def _handle_error_event(self, error_data: Dict[str, Any]):
         """
@@ -940,7 +988,7 @@ class MainController:
             Kontostand als Dictionary oder Fehlermeldung
         """
         try:
-            if (self.module_status['live_trading']['status'] in ["running", "paused"] and 
+            if (self.module_status['live_trading']['status'] in ["running", "paused"] and
                 hasattr(self.live_trading, 'get_account_balance')):
                 balance = self.live_trading.get_account_balance()
                 return {
@@ -967,7 +1015,7 @@ class MainController:
             Offene Positionen als Dictionary oder Fehlermeldung
         """
         try:
-            if (self.module_status['live_trading']['status'] in ["running", "paused"] and 
+            if (self.module_status['live_trading']['status'] in ["running", "paused"] and
                 hasattr(self.live_trading, 'get_open_positions')):
                 positions = self.live_trading.get_open_positions()
                 return {
@@ -1028,7 +1076,6 @@ class MainController:
                 'status': 'success',
                 'metrics': metrics
             }
-            
         except Exception as e:
             self.logger.error(f"Fehler beim Abrufen der Performance-Metriken: {str(e)}")
             return {
@@ -1047,7 +1094,6 @@ class MainController:
             Ergebnis als Dictionary
         """
         transcript_path = params.get('path', '')
-        
         if not transcript_path:
             return {
                 'status': 'error',
@@ -1062,7 +1108,7 @@ class MainController:
         
         Args:
             transcript_path: Pfad zum Transkript
-            
+        
         Returns:
             Ergebnis als Dictionary
         """
@@ -1102,11 +1148,9 @@ class MainController:
                     'status': 'error',
                     'message': 'TranscriptProcessor unterstützt process_transcript nicht'
                 }
-            
         except Exception as e:
             self.logger.error(f"Fehler bei der Transkript-Verarbeitung: {str(e)}")
             self.logger.error(traceback.format_exc())
-            
             return {
                 'status': 'error',
                 'message': f"Fehler: {str(e)}"
@@ -1142,7 +1186,7 @@ class MainController:
         """
         # In einer vollständigen Implementierung würde hier die tatsächliche Laufzeit berechnet
         return "00:00:00"  # Dummy-Wert
-
+    
     def generate_report(self) -> Dict[str, Any]:
         """
         Erstellt einen umfassenden Status- und Performance-Bericht.
@@ -1174,7 +1218,6 @@ class MainController:
                 report['data_status'] = self.data_pipeline.get_status()
             
             return report
-            
         except Exception as e:
             self.logger.error(f"Fehler bei der Bericht-Generierung: {str(e)}")
             return {
@@ -1182,6 +1225,7 @@ class MainController:
                 'message': f"Fehler: {str(e)}",
                 'timestamp': datetime.datetime.now().isoformat()
             }
+
 
 # Beispiel für die Ausführung
 if __name__ == "__main__":
@@ -1202,7 +1246,6 @@ if __name__ == "__main__":
                 controller.stop()
         else:
             print(f"Bot konnte nicht gestartet werden. Status: {controller.state}")
-            
     except Exception as e:
         print(f"Kritischer Fehler: {str(e)}")
         traceback.print_exc()
