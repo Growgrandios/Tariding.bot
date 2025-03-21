@@ -9,22 +9,7 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Core-Module
-from src.core.config_manager import ConfigManager
-from src.core.main_controller import MainController
-
-# Konfiguration des Logging-Systems
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("logs/main.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-logger = logging.getLogger("main")
-
+# Verzeichnisse zuerst einrichten
 def setup_directories():
     """Erstellt die notwendigen Verzeichnisse, falls sie nicht existieren."""
     directories = [
@@ -42,30 +27,33 @@ def setup_directories():
     
     for directory in directories:
         Path(directory).mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Verzeichnis sichergestellt: {directory}")
+
+# Logs-Verzeichnis vor dem Einrichten des Loggings erstellen
+setup_directories()
+
+# Logging-System konfigurieren
+from src.utils.logging_setup import setup_logging
+logger = setup_logging(log_level=logging.INFO)
+
+# Core-Module importieren (nach Logging-Setup)
+from src.core.config_manager import ConfigManager
+from src.core.main_controller import MainController
 
 def parse_arguments():
     """Parst Kommandozeilenargumente."""
     parser = argparse.ArgumentParser(description="Gemma Trading Bot - Ein auf Gemma 3 basierender Krypto-Trading-Bot")
-    
     parser.add_argument("--config", type=str, default="data/config/config.yaml",
                         help="Pfad zur Konfigurationsdatei")
-    
     parser.add_argument("--mode", type=str, choices=["live", "paper", "backtest", "learn"],
                         help="Trading-Modus (überschreibt Konfigurationsdatei)")
-    
     parser.add_argument("--debug", action="store_true",
                         help="Debug-Modus aktivieren")
-    
     parser.add_argument("--no-telegram", action="store_true",
                         help="Telegram-Bot deaktivieren")
-    
     parser.add_argument("--process-transcript", type=str,
                         help="Transkriptdatei verarbeiten und beenden")
-    
     parser.add_argument("--learn", action="store_true",
                         help="Starten im Lernmodus (trainiere Modelle)")
-    
     return parser.parse_args()
 
 def main():
@@ -77,9 +65,6 @@ def main():
     
     # Lade Umgebungsvariablen aus .env-Datei
     load_dotenv()
-    
-    # Verzeichnisse einrichten
-    setup_directories()
     
     # Kommandozeilenargumente parsen
     args = parse_arguments()
@@ -107,16 +92,13 @@ def main():
         logger.info("Starte im Lernmodus")
         controller.start(mode="learn", auto_trade=False)
         controller.train_models()
+        controller.stop()
+        logger.info("Lernen abgeschlossen, Programm wird beendet")
         return
     
     # Trading-Modus überschreiben, falls angegeben
-    mode = args.mode
-    if mode:
-        logger.info(f"Trading-Modus via Kommandozeile gesetzt: {mode}")
-    else:
-        # Ansonsten aus der Konfiguration lesen
-        mode = config_manager.get_config("trading").get("mode", "paper")
-        logger.info(f"Trading-Modus aus Konfiguration: {mode}")
+    mode = args.mode if args.mode else config_manager.get_config("trading").get("mode", "paper")
+    logger.info(f"Trading-Modus: {mode}")
     
     # Telegram deaktivieren, falls angefordert
     if args.no_telegram:
@@ -126,12 +108,15 @@ def main():
             config["telegram"]["enabled"] = False
             config_manager.update_section("telegram", config["telegram"])
     
-    # Bot starten
-    controller.start(mode=mode)
-    
     try:
-        # Bot laufen lassen (blockierend)
-        controller.run()
+        # Bot mit entsprechendem Modus starten
+        controller.start(mode=mode, auto_trade=(mode == "live"))
+        
+        # Hauptthread am Leben halten
+        # Annahme: controller.start() ist nicht-blockierend und wir müssen das Programm am Laufen halten
+        import time
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Benutzerabbruch erkannt")
     except Exception as e:
@@ -143,11 +128,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Am Anfang der main.py
-from src.utils.logging_setup import setup_logging
-import logging
-
-# Logging initialisieren
-logger = setup_logging(log_level=logging.INFO)
-
