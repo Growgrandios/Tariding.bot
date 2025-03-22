@@ -197,7 +197,17 @@ class MainController:
             self.logger.error(traceback.format_exc())
             self.state = BotState.ERROR
             raise
+
+    def __init__(self, config):
+    # ... bestehender Initialisierungscode ...
     
+    # Initialisiere Module
+    self.data_pipeline = DataPipeline(config.get('data_pipeline', {}))
+    self.black_swan_detector = BlackSwanDetector(config.get('black_swan_detector', {}))
+    
+    # Verbinde BlackSwanDetector mit DataPipeline
+    self.black_swan_detector.set_data_pipeline(self.data_pipeline)
+
     def _connect_modules(self):
         """Verbindet die Module miteinander für Kommunikation und Datenaustausch."""
         try:
