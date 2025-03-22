@@ -20,7 +20,6 @@ def setup_directories():
         "data/backtest_results",
         "data/knowledge",
         "data/transcripts",
-        "data/tax",
         "data/tax/reports",
         "data/black_swan"
     ]
