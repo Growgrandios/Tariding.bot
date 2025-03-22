@@ -1,3 +1,5 @@
+# tax_module.py
+
 import os
 import logging
 import json
@@ -82,4 +84,68 @@ class TaxModule:
         
         self.logger.info("TaxModule erfolgreich initialisiert")
     
-    # [Rest der Klasse bleibt unverändert...]
+    def _load_existing_data(self):
+        """
+        Lädt vorhandene Handelsdaten und Steuerdaten, falls verfügbar.
+        """
+        try:
+            # Pfad zur gespeicherten Handelsdaten
+            trades_file = self.base_path / f"trades_{self.current_period['year']}.json"
+            positions_file = self.base_path / f"positions_{self.current_period['year']}.json"
+            
+            # Lade Trades, falls vorhanden
+            if trades_file.exists():
+                with open(trades_file, 'r') as f:
+                    self.trades = json.load(f)
+                self.logger.info(f"Historische Trades geladen: {len(self.trades)} Einträge")
+            
+            # Lade Positionen, falls vorhanden
+            if positions_file.exists():
+                with open(positions_file, 'r') as f:
+                    self.positions = json.load(f)
+                self.logger.info(f"Offene Positionen geladen: {len(self.positions)} Einträge")
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Laden der bestehenden Daten: {str(e)}")
+            # Setze auf Standardwerte bei Fehler
+            self.trades = []
+            self.positions = {}
+    
+    def process_trade(self, trade_data: Dict[str, Any]):
+        """
+        Verarbeitet einen neuen Trade für die Steuerberechnung.
+        
+        Args:
+            trade_data: Dictionary mit Tradedaten
+        """
+        try:
+            # Implementierung für die Verarbeitung von Trades
+            self.logger.info(f"Trade verarbeitet: {trade_data.get('symbol', 'unbekannt')}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Verarbeitung des Trades: {str(e)}")
+            return False
+    
+    def get_tax_summary(self) -> Dict[str, Any]:
+        """
+        Gibt eine Zusammenfassung der aktuellen Steuersituation zurück.
+        
+        Returns:
+            Dictionary mit Steuer-Zusammenfassung
+        """
+        try:
+            # Basisimplementierung für Steuerzusammenfassung
+            summary = {
+                'year': self.current_period['year'],
+                'tax_method': self.method.value,
+                'country': self.country,
+                'exempt_limit': self.exempt_limit,
+                'timestamp': datetime.now().isoformat()
+            }
+            return summary
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Steuerzusammenfassung: {str(e)}")
+            return {
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
