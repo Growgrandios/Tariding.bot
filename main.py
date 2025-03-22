@@ -62,31 +62,31 @@ def main():
     logger.info("=======================================")
     logger.info("Gemma Trading Bot wird gestartet...")
     logger.info("=======================================")
-    
+
     # Lade Umgebungsvariablen aus .env-Datei
     load_dotenv()
-    
+
     # Kommandozeilenargumente parsen
     args = parse_arguments()
-    
+
     # Debug-Modus
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Debug-Modus aktiviert")
-    
+
     # Config Manager initialisieren
     config_manager = ConfigManager(args.config)
-    
+
     # Main Controller initialisieren
     controller = MainController(config_manager)
-    
+
     # Prüfen, ob Transkript-Verarbeitung angefordert wurde
     if args.process_transcript:
         logger.info(f"Verarbeite Transkript: {args.process_transcript}")
         result = controller.process_transcript(args.process_transcript)
         logger.info(f"Ergebnis: {json.dumps(result, indent=2)}")
         return
-    
+
     # Prüfen, ob der Lernmodus aktiviert ist
     if args.learn:
         logger.info("Starte im Lernmodus")
@@ -95,11 +95,11 @@ def main():
         controller.stop()
         logger.info("Lernen abgeschlossen, Programm wird beendet")
         return
-    
+
     # Trading-Modus überschreiben, falls angegeben
     mode = args.mode if args.mode else config_manager.get_config("trading").get("mode", "paper")
     logger.info(f"Trading-Modus: {mode}")
-    
+
     # Telegram deaktivieren, falls angefordert
     if args.no_telegram:
         logger.info("Telegram-Bot wird deaktiviert")
@@ -107,11 +107,11 @@ def main():
         if "telegram" in config:
             config["telegram"]["enabled"] = False
             config_manager.update_section("telegram", config["telegram"])
-    
+
     try:
         # Bot mit entsprechendem Modus starten
         controller.start(mode=mode, auto_trade=(mode == "live"))
-        
+
         # Hauptthread am Leben halten
         # Annahme: controller.start() ist nicht-blockierend und wir müssen das Programm am Laufen halten
         import time
