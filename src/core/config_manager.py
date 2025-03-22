@@ -19,11 +19,10 @@ class ConfigManager:
     Lädt Konfigurationen aus YAML-Dateien und .env-Dateien, verwaltet API-Schlüssel
     und stellt Konfigurationen für alle Module bereit.
     """
-    
+
     def __init__(self, config_path: Optional[str] = None):
         """
         Initialisiert den ConfigManager.
-        
         Args:
             config_path: Optionaler Pfad zur Konfigurationsdatei (Standard: 'data/config/config.yaml')
         """
@@ -48,11 +47,10 @@ class ConfigManager:
         self.api_keys = self._load_api_keys()
         
         logger.info("ConfigManager erfolgreich initialisiert")
-    
+
     def _load_config(self) -> Dict[str, Any]:
         """
         Lädt die Konfiguration aus der YAML-Datei.
-        
         Returns:
             Dictionary mit Konfigurationseinstellungen
         """
@@ -68,11 +66,10 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Fehler beim Laden der Konfiguration: {str(e)}")
             return self._create_default_config()
-    
+
     def _create_default_config(self) -> Dict[str, Any]:
         """
         Erstellt eine Standardkonfiguration und speichert sie.
-        
         Returns:
             Dictionary mit Standardkonfiguration
         """
@@ -141,7 +138,7 @@ class ConfigManager:
                 'exempt_limit': 600  # Freigrenze in Euro
             }
         }
-        
+
         try:
             with open(self.config_path, 'w', encoding='utf-8') as file:
                 yaml.dump(default_config, file, default_flow_style=False, sort_keys=False)
@@ -150,11 +147,10 @@ class ConfigManager:
             logger.error(f"Fehler beim Speichern der Standardkonfiguration: {str(e)}")
         
         return default_config
-    
+
     def _load_api_keys(self) -> Dict[str, Any]:
         """
         Lädt API-Schlüssel aus Umgebungsvariablen.
-        
         Returns:
             Dictionary mit API-Schlüsseln
         """
@@ -169,9 +165,10 @@ class ConfigManager:
                 'allowed_users': os.getenv('TELEGRAM_ALLOWED_USERS', '')
             },
             'alpha_vantage': os.getenv('ALPHA_VANTAGE_API_KEY', ''),
-            'news_api': os.getenv('NEWS_API_KEY', '')
+            'news_api': os.getenv('NEWS_API_KEY', ''),
+            'huggingface': os.getenv('HUGGINGFACE_TOKEN', '')
         }
-        
+
         # Überprüfe, ob API-Schlüssel vorhanden sind
         missing_keys = []
         if not api_keys['bitget']['api_key']:
@@ -182,58 +179,51 @@ class ConfigManager:
             missing_keys.append('BITGET_API_PASSPHRASE')
         if not api_keys['telegram']['bot_token']:
             missing_keys.append('TELEGRAM_BOT_TOKEN')
-        
+
         if missing_keys:
             logger.warning(f"Fehlende API-Schlüssel: {', '.join(missing_keys)}")
         else:
             logger.info("Alle erforderlichen API-Schlüssel geladen")
-        
+
         return api_keys
-    
+
     def get_config(self, section: Optional[str] = None) -> Dict[str, Any]:
         """
         Gibt die Konfiguration zurück, optional für einen bestimmten Abschnitt.
-        
         Args:
             section: Optionaler Konfigurationsabschnitt
-        
         Returns:
             Komplette Konfiguration oder Konfiguration für einen bestimmten Abschnitt
         """
         if section:
             return self.config.get(section, {})
         return self.config
-    
+
     def get_api_keys(self) -> Dict[str, Any]:
         """
         Gibt alle API-Schlüssel zurück.
-        
         Returns:
             Dictionary mit allen API-Schlüsseln
         """
         return self.api_keys
-    
+
     def get_api_key(self, service: str) -> Dict[str, Any]:
         """
         Gibt API-Schlüssel für einen bestimmten Dienst zurück.
-        
         Args:
             service: Name des Dienstes (z.B. 'bitget', 'telegram')
-        
         Returns:
             API-Schlüssel für den angegebenen Dienst
         """
         return self.api_keys.get(service, {})
-    
+
     def update_config(self, section: str, key: str, value: Any) -> bool:
         """
         Aktualisiert einen Konfigurationswert und speichert die Änderung.
-        
         Args:
             section: Konfigurationsabschnitt
             key: Konfigurationsschlüssel
             value: Neuer Wert
-        
         Returns:
             True bei Erfolg, False bei Fehler
         """
@@ -256,15 +246,13 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Fehler beim Aktualisieren der Konfiguration: {str(e)}")
             return False
-    
+
     def update_section(self, section: str, config: Dict[str, Any]) -> bool:
         """
         Aktualisiert einen gesamten Konfigurationsabschnitt und speichert die Änderung.
-        
         Args:
             section: Konfigurationsabschnitt
             config: Neue Konfiguration für den Abschnitt
-        
         Returns:
             True bei Erfolg, False bei Fehler
         """
@@ -284,11 +272,10 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Fehler beim Aktualisieren des Konfigurationsabschnitts: {str(e)}")
             return False
-    
+
     def _create_backup(self) -> str:
         """
         Erstellt ein Backup der aktuellen Konfigurationsdatei.
-        
         Returns:
             Pfad zur Backup-Datei oder leerer String bei Fehler
         """
@@ -312,11 +299,10 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Fehler beim Erstellen des Konfigurationsbackups: {str(e)}")
             return ""
-    
+
     def _cleanup_backups(self, max_backups: int = 10) -> None:
         """
         Räumt alte Backup-Dateien auf, behält nur die neuesten.
-        
         Args:
             max_backups: Maximale Anzahl an Backups, die behalten werden sollen
         """
@@ -335,14 +321,12 @@ class ConfigManager:
                     logger.debug(f"Altes Konfigurationsbackup gelöscht: {file_path}")
         except Exception as e:
             logger.error(f"Fehler beim Aufräumen alter Backups: {str(e)}")
-    
+
     def restore_backup(self, backup_path: str) -> bool:
         """
         Stellt eine Konfiguration aus einem Backup wieder her.
-        
         Args:
             backup_path: Pfad zur Backup-Datei
-        
         Returns:
             True bei Erfolg, False bei Fehler
         """
@@ -365,11 +349,10 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Fehler beim Wiederherstellen der Konfiguration: {str(e)}")
             return False
-    
+
     def get_backups(self) -> Dict[str, Any]:
         """
         Gibt eine Liste aller verfügbaren Konfigurationsbackups zurück.
-        
         Returns:
             Dictionary mit Backup-Informationen
         """
@@ -394,9 +377,9 @@ class ConfigManager:
                             'timestamp': timestamp.isoformat(),
                             'size': file_stats.st_size
                         })
-            
-            # Nach Zeitstempel sortieren (neueste zuerst)
-            backups.sort(key=lambda x: x['timestamp'], reverse=True)
+                
+                # Nach Zeitstempel sortieren (neueste zuerst)
+                backups.sort(key=lambda x: x['timestamp'], reverse=True)
             
             return {
                 'count': len(backups),
@@ -409,14 +392,12 @@ class ConfigManager:
                 'backups': [],
                 'error': str(e)
             }
-    
+
     def export_config(self, export_path: str) -> bool:
         """
         Exportiert die aktuelle Konfiguration in eine Datei (ohne sensible Daten).
-        
         Args:
             export_path: Pfad zur Export-Datei
-        
         Returns:
             True bei Erfolg, False bei Fehler
         """
@@ -433,14 +414,12 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Fehler beim Exportieren der Konfiguration: {str(e)}")
             return False
-    
+
     def _remove_sensitive_data(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Entfernt sensible Daten aus einer Konfiguration.
-        
         Args:
             config: Konfiguration
-        
         Returns:
             Konfiguration ohne sensible Daten
         """
@@ -467,14 +446,12 @@ class ConfigManager:
         
         remove_sensitive(config_copy)
         return config_copy
-    
+
     def import_config(self, import_path: str) -> bool:
         """
         Importiert eine Konfiguration aus einer Datei.
-        
         Args:
             import_path: Pfad zur Import-Datei
-        
         Returns:
             True bei Erfolg, False bei Fehler
         """
@@ -505,15 +482,13 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"Fehler beim Importieren der Konfiguration: {str(e)}")
             return False
-    
+
     def _merge_configs(self, imported: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
         """
         Führt zwei Konfigurationen zusammen, wobei sensible Daten aus der aktuellen Konfiguration beibehalten werden.
-        
         Args:
             imported: Importierte Konfiguration
             current: Aktuelle Konfiguration
-        
         Returns:
             Zusammengeführte Konfiguration
         """
@@ -543,11 +518,10 @@ class ConfigManager:
         
         merge_sensitive(result, current)
         return result
-    
+
     def validate_config(self) -> Dict[str, Any]:
         """
         Überprüft die Konfiguration auf Fehler oder fehlende Werte.
-        
         Returns:
             Dictionary mit Validierungsergebnissen
         """
@@ -563,6 +537,7 @@ class ConfigManager:
         # Überprüfe API-Schlüssel
         if not self.api_keys['bitget']['api_key'] or not self.api_keys['bitget']['api_secret']:
             warnings.append("Bitget API-Schlüssel fehlen. Live-Trading ist nicht möglich.")
+        
         if not self.api_keys['telegram']['bot_token']:
             warnings.append("Telegram Bot-Token fehlt. Telegram-Benachrichtigungen sind nicht möglich.")
         
