@@ -140,6 +140,7 @@ class MainController:
             self.data_pipeline = DataPipeline(api_keys)
             self.modules['data_pipeline'] = self.data_pipeline
             self.module_status['data_pipeline'] = {"status": "initialized", "errors": []}
+            self.black_swan_detector.set_data_pipeline(self.data_pipeline)
             
             # Live Trading Connector
             self.logger.info("Initialisiere LiveTradingConnector...")
