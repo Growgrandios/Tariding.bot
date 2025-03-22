@@ -1,2312 +1,1769 @@
 # learning_module.py
 
 import os
-import logging
-import threading
-import time
-import pickle
+import sys
 import json
+import logging
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union, Tuple, Callable
-import matplotlib.pyplot as plt
-import seaborn as sns
+import datetime
+import pickle
+import threading
+import time
 from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.model_selection import train_test_split, GridSearchCV
+from typing import Dict, List, Any, Optional, Union, Tuple
+
+# Machine Learning-Bibliotheken
+import torch
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, load_model, save_model
-from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
-import traceback
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score, precision_score, recall_score
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingRegressor
+
+# Technische Analyse
+import talib
+import talib.abstract as ta
 
 class LearningModule:
     """
-    Modul für Machine Learning und Backtesting von Handelsstrategien.
-    Trainiert verschiedene Modelle auf historischen Daten und bewertet ihre Performance.
-    Integriert sich nahtlos mit anderen Systemkomponenten für optimale Trading-Entscheidungen.
+    Learning Module für den Trading Bot.
+    
+    Analysiert historische Daten, trainiert ML-Modelle und generiert
+    Trading-Signale basierend auf Machine Learning.
     """
-
-    def __init__(self, config: Dict[str, Any]):
+    
+    def __init__(self, config: Dict[str, Any], data_pipeline=None):
         """
-        Initialisiert das Learning-Modul.
-
+        Initialisiert das Learning Module.
+        
         Args:
-            config: Konfigurationseinstellungen für das Learning-Modul
+            config: Konfigurationseinstellungen
+            data_pipeline: Optional, Referenz zur Datenpipeline
         """
         self.logger = logging.getLogger("LearningModule")
         self.logger.info("Initialisiere LearningModule...")
-
-        # Konfiguration laden
-        self.config = config
-        self.backtest_days = config.get('backtest_days', 90)
-        self.paper_trading_days = config.get('paper_trading_days', 14)
-        self.target_win_rate = config.get('target_win_rate', 0.6)
-        self.auto_update_enabled = config.get('auto_update_enabled', True)
-        self.update_interval_hours = config.get('update_interval_hours', 24)
-
-        # Trainingskonfiguration
-        self.training_config = config.get('training', {})
-        self.epochs = self.training_config.get('epochs', 100)
-        self.batch_size = self.training_config.get('batch_size', 32)
-        self.validation_split = self.training_config.get('validation_split', 0.2)
-        self.patience = self.training_config.get('patience', 10)
-        self.early_stopping = self.training_config.get('early_stopping', True)
-        self.max_training_time = self.training_config.get('max_training_time_hours', 2)
         
-        # Modellkonfiguration
-        self.model_config = config.get('models', {})
-        self.default_model_type = self.model_config.get('default_type', 'random_forest')
-        self.enable_ensemble = self.model_config.get('enable_ensemble', True)
-        self.auto_optimize_hyperparams = self.model_config.get('auto_optimize_hyperparams', True)
+        # Konfiguration speichern
+        self.config = config or {}
         
-        # Backtesting-Konfiguration
-        self.backtest_config = config.get('backtest', {})
-        self.risk_per_trade = self.backtest_config.get('risk_per_trade', 0.02)
-        self.use_stop_loss = self.backtest_config.get('use_stop_loss', True)
-        self.trailing_stop = self.backtest_config.get('trailing_stop', True)
-        self.max_open_positions = self.backtest_config.get('max_open_positions', 5)
-
-        # Pfade für Modelle und Ergebnisse
-        self.models_path = Path(config.get('models_path', 'data/models'))
-        self.results_path = Path(config.get('results_path', 'data/backtest_results'))
-        self.charts_path = Path(config.get('charts_path', 'data/charts'))
+        # Basispfade für Modelle und Daten
+        self.base_path = Path(self.config.get('base_path', 'data'))
+        self.models_path = self.base_path / 'models'
+        self.backtest_results_path = self.base_path / 'backtest_results'
         
-        # Pfade erstellen, falls nicht vorhanden
+        # Verzeichnisse erstellen falls nicht vorhanden
         self.models_path.mkdir(parents=True, exist_ok=True)
-        self.results_path.mkdir(parents=True, exist_ok=True)
-        self.charts_path.mkdir(parents=True, exist_ok=True)
-
-        # Modelle und Ergebnisse
+        self.backtest_results_path.mkdir(parents=True, exist_ok=True)
+        
+        # Data Pipeline Referenz
+        self.data_pipeline = data_pipeline
+        
+        # Trading-Parameter
+        self.backtest_days = self.config.get('backtest_days', 90)
+        self.paper_trading_days = self.config.get('paper_trading_days', 14)
+        self.target_win_rate = self.config.get('target_win_rate', 0.6)
+        
+        # Training-Parameter
+        training_config = self.config.get('training', {})
+        self.epochs = training_config.get('epochs', 100)
+        self.batch_size = training_config.get('batch_size', 32)
+        self.validation_split = training_config.get('validation_split', 0.2)
+        self.patience = training_config.get('patience', 10)
+        
+        # Liste der zu überwachenden Märkte
+        self.markets = self.config.get('markets', [
+            {'symbol': 'BTC/USDT', 'timeframes': ['15m', '1h', '4h']},
+            {'symbol': 'ETH/USDT', 'timeframes': ['15m', '1h', '4h']},
+            {'symbol': 'SOL/USDT', 'timeframes': ['1h', '4h']}
+        ])
+        
+        # Geladene Modelle
         self.models = {}
-        self.performance_metrics = {}
-        self.current_signals = {}
+        
+        # Feature-Konfigurations-Manager
+        self.feature_config = self._initialize_feature_config()
+        
+        # Handelshistorie
         self.trade_history = []
-        self.feature_importance_cache = {}
-        self.ensemble_models = {}
-
-        # Features
-        self.default_features = [
-            'close', 'volume', 'rsi_14', 'ema_9', 'ema_21', 'macd', 'macd_signal',
-            'bband_upper', 'bband_lower', 'atr_14', 'vwap', 'adx_14', 'obv', 'cci_20'
-        ]
-
-        # Daten Pipeline (wird später gesetzt)
-        self.data_pipeline = None
         
-        # Telegram Interface (wird später gesetzt)
-        self.telegram_interface = None
+        # Performance-Metriken
+        self.performance_metrics = {
+            'trained_models': 0,
+            'backtest_results': {},
+            'global_accuracy': None,
+            'last_training_time': None
+        }
         
-        # Black Swan Detector (wird später gesetzt)
-        self.black_swan_detector = None
+        # Multithreading-Schutz
+        self.model_lock = threading.Lock()
         
-        # Transcript Processor (wird später gesetzt)
-        self.transcript_processor = None
-        
-        # Event Callbacks
-        self.signal_callbacks = []
-        self.training_complete_callbacks = []
-        self.backtest_complete_callbacks = []
-
-        # Thread-Management
+        # Status
         self.is_training = False
-        self.is_backtesting = False
-        self.training_thread = None
-        self.backtesting_thread = None
-        self.update_thread = None
-        self.stop_update_thread = threading.Event()
+        self.current_training_task = None
         
-        # Modell-Zeitstempel
-        self.last_model_update = datetime.now() - timedelta(hours=self.update_interval_hours)
-        
-        # Status-Counter
-        self.training_count = 0
-        self.successful_training_count = 0
-        self.backtest_count = 0
-        self.signals_generated = 0
-
         self.logger.info("LearningModule erfolgreich initialisiert")
-
+    
     def set_data_pipeline(self, data_pipeline):
         """
         Setzt die Datenpipeline für den Zugriff auf Marktdaten.
-
+        
         Args:
             data_pipeline: Referenz zur Datenpipeline
         """
         self.data_pipeline = data_pipeline
         self.logger.info("Datenpipeline erfolgreich verbunden")
+    
+    def _initialize_feature_config(self) -> Dict[str, Any]:
+        """
+        Initialisiert die Konfiguration für Feature-Generierung.
         
-        # Starte automatische Updates, wenn aktiviert
-        if self.auto_update_enabled:
-            self._start_auto_update_thread()
-
-    def set_telegram_interface(self, telegram_interface):
-        """
-        Setzt die Telegram-Schnittstelle für Benachrichtigungen.
-        
-        Args:
-            telegram_interface: Referenz zur TelegramInterface
-        """
-        self.telegram_interface = telegram_interface
-        self.logger.info("TelegramInterface erfolgreich verbunden")
-
-    def set_black_swan_detector(self, black_swan_detector):
-        """
-        Verbindet mit dem Black Swan Detector für Anomalieerkennung.
-        
-        Args:
-            black_swan_detector: Referenz zum BlackSwanDetector
-        """
-        self.black_swan_detector = black_swan_detector
-        self.logger.info("BlackSwanDetector erfolgreich verbunden")
-        
-        # Registriere Callback für Black Swan Events
-        if hasattr(black_swan_detector, 'register_notification_callback'):
-            black_swan_detector.register_notification_callback(self._handle_black_swan_event)
-
-    def set_transcript_processor(self, transcript_processor):
-        """
-        Verbindet mit dem Transcript Processor für Textanalysen.
-        
-        Args:
-            transcript_processor: Referenz zum TranscriptProcessor
-        """
-        self.transcript_processor = transcript_processor
-        self.logger.info("TranscriptProcessor erfolgreich verbunden")
-
-    def register_signal_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """
-        Registriert einen Callback für generierte Trading-Signale.
-        
-        Args:
-            callback: Funktion, die bei neuen Signalen aufgerufen wird
-        """
-        self.signal_callbacks.append(callback)
-        self.logger.debug(f"Signal-Callback registriert, jetzt {len(self.signal_callbacks)} Callbacks")
-
-    def register_training_complete_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """
-        Registriert einen Callback für abgeschlossene Trainings.
-        
-        Args:
-            callback: Funktion, die nach Abschluss des Trainings aufgerufen wird
-        """
-        self.training_complete_callbacks.append(callback)
-        self.logger.debug(f"Training-Complete-Callback registriert, jetzt {len(self.training_complete_callbacks)} Callbacks")
-
-    def register_backtest_complete_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """
-        Registriert einen Callback für abgeschlossene Backtests.
-        
-        Args:
-            callback: Funktion, die nach Abschluss des Backtests aufgerufen wird
-        """
-        self.backtest_complete_callbacks.append(callback)
-        self.logger.debug(f"Backtest-Complete-Callback registriert, jetzt {len(self.backtest_complete_callbacks)} Callbacks")
-
-    def _start_auto_update_thread(self):
-        """Startet einen Thread für automatische Modellupdates."""
-        if self.update_thread is not None and self.update_thread.is_alive():
-            self.logger.warning("Auto-Update-Thread läuft bereits")
-            return
-
-        self.stop_update_thread.clear()
-        self.update_thread = threading.Thread(
-            target=self._auto_update_loop,
-            daemon=True
-        )
-        self.update_thread.start()
-        self.logger.info(f"Auto-Update-Thread gestartet (Intervall: {self.update_interval_hours} Stunden)")
-
-    def _stop_auto_update_thread(self):
-        """Stoppt den Thread für automatische Modellupdates."""
-        if self.update_thread is not None and self.update_thread.is_alive():
-            self.stop_update_thread.set()
-            self.update_thread.join(timeout=10)
-            self.logger.info("Auto-Update-Thread gestoppt")
-
-    def _auto_update_loop(self):
-        """Loop-Funktion für automatische Modellupdates."""
-        self.logger.info("Auto-Update-Loop gestartet")
-        
-        while not self.stop_update_thread.is_set():
-            try:
-                # Prüfe, ob ein Update erforderlich ist
-                time_since_update = datetime.now() - self.last_model_update
-                if time_since_update.total_seconds() >= self.update_interval_hours * 3600:
-                    self.logger.info(f"Auto-Update wird durchgeführt (letztes Update vor {time_since_update.total_seconds() / 3600:.1f} Stunden)")
-                    
-                    # Aktive Modelle aktualisieren
-                    active_models = self.get_active_models()
-                    for model_info in active_models:
-                        model_name = model_info['name']
-                        symbol = model_info['symbol']
-                        timeframe = model_info['timeframe']
-                        
-                        # Modell neu trainieren
-                        if not self.is_training and not self.is_backtesting:
-                            self.logger.info(f"Starte Auto-Update für Modell {model_name}")
-                            self.train_model(
-                                model_name=model_name,
-                                symbol=symbol,
-                                timeframe=timeframe,
-                                model_type=model_info.get('type', self.default_model_type)
-                            )
-                            
-                            # Warte auf Abschluss des Trainings
-                            while self.is_training:
-                                time.sleep(5)
-                            
-                            # Sende Benachrichtigung über Update
-                            if self.telegram_interface:
-                                self.telegram_interface.send_notification(
-                                    title="Modell-Update abgeschlossen",
-                                    message=f"Das automatische Update für Modell {model_name} ({symbol}, {timeframe}) wurde abgeschlossen.",
-                                    priority="low"
-                                )
-                    
-                    self.last_model_update = datetime.now()
-                
-                # Prüfe alle 10 Minuten
-                self.stop_update_thread.wait(timeout=600)
-            except Exception as e:
-                self.logger.error(f"Fehler im Auto-Update-Loop: {str(e)}")
-                self.logger.error(traceback.format_exc())
-                time.sleep(300)  # Warte 5 Minuten bei Fehlern
-
-    def _handle_black_swan_event(self, event_data: Dict[str, Any]):
-        """
-        Verarbeitet Black Swan Events vom BlackSwanDetector.
-        
-        Args:
-            event_data: Informationen zum erkannten Black Swan Event
-        """
-        self.logger.warning(f"Black Swan Event erkannt: {event_data.get('title')}, Schweregrad: {event_data.get('severity', 0)}")
-        
-        # Bei schwerwiegenden Events aktuelle Trading-Signale anpassen
-        severity = event_data.get('severity', 0)
-        if severity > 0.7:
-            self.logger.warning("Passe Trading-Signale aufgrund des Black Swan Events an")
-            
-            # Bestimmte betroffene Assets identifizieren
-            affected_symbols = []
-            for detail in event_data.get('details', []):
-                if 'symbol' in detail:
-                    affected_symbols.append(detail['symbol'])
-            
-            # Trading-Signale anpassen
-            for key, signal in list(self.current_signals.items()):
-                symbol = signal.get('symbol')
-                
-                # Wenn alle Symbole betroffen sind oder das spezifische Symbol betroffen ist
-                if not affected_symbols or symbol in affected_symbols:
-                    # Signal auf neutral setzen oder Risikowarnung hinzufügen
-                    signal['black_swan_warning'] = True
-                    signal['black_swan_severity'] = severity
-                    signal['direction'] = "neutral"  # In Krisenzeiten neutral bleiben
-                    signal['signal_strength'] = 0.1  # Sehr geringe Signalstärke
-                    
-                    # Black Swan Details hinzufügen
-                    signal['black_swan_event'] = {
-                        'title': event_data.get('title'),
-                        'time': event_data.get('timestamp'),
-                        'severity': severity
-                    }
-                    
-                    # Signal-Callbacks informieren
-                    self._notify_signal_callbacks(signal)
-        
-        # Signal-Event im Log vermerken
-        self.logger.info(f"Trading-Signale aufgrund von Black Swan Event angepasst: {event_data.get('title')}")
-
-    def _notify_signal_callbacks(self, signal: Dict[str, Any]):
-        """
-        Benachrichtigt alle registrierten Signal-Callbacks.
-        
-        Args:
-            signal: Das generierte Trading-Signal
-        """
-        for callback in self.signal_callbacks:
-            try:
-                callback(signal)
-            except Exception as e:
-                self.logger.error(f"Fehler im Signal-Callback: {str(e)}")
-
-    def _notify_training_complete_callbacks(self, result: Dict[str, Any]):
-        """
-        Benachrichtigt alle registrierten Training-Complete-Callbacks.
-        
-        Args:
-            result: Das Ergebnis des Trainings
-        """
-        for callback in self.training_complete_callbacks:
-            try:
-                callback(result)
-            except Exception as e:
-                self.logger.error(f"Fehler im Training-Complete-Callback: {str(e)}")
-
-    def _notify_backtest_complete_callbacks(self, result: Dict[str, Any]):
-        """
-        Benachrichtigt alle registrierten Backtest-Complete-Callbacks.
-        
-        Args:
-            result: Das Ergebnis des Backtests
-        """
-        for callback in self.backtest_complete_callbacks:
-            try:
-                callback(result)
-            except Exception as e:
-                self.logger.error(f"Fehler im Backtest-Complete-Callback: {str(e)}")
-
-    def train_model(self, model_name: str, symbol: str, timeframe: str = '1h',
-                   features: Optional[List[str]] = None, start_date: Optional[str] = None,
-                   end_date: Optional[str] = None, model_type: str = 'random_forest',
-                   target_metric: str = 'direction'):
-        """
-        Trainiert ein Machine-Learning-Modell für ein bestimmtes Symbol und Zeitrahmen.
-
-        Args:
-            model_name: Name des Modells für die spätere Referenzierung
-            symbol: Handelssymbol (z.B. 'BTC/USDT')
-            timeframe: Zeitrahmen ('1h', '4h', '1d', etc.)
-            features: Liste von Features für das Training (optional)
-            start_date: Startdatum für Trainingsdaten (optional)
-            end_date: Enddatum für Trainingsdaten (optional)
-            model_type: Typ des Modells ('random_forest', 'gradient_boosting', 'lstm', 'ensemble')
-            target_metric: Zielmetrik ('direction', 'volatility', 'return')
-
         Returns:
-            Dict mit Status und Informationen zum Training
+            Dictionary mit Feature-Konfiguration
         """
-        if self.is_training:
-            self.logger.warning(f"Training für {model_name} kann nicht gestartet werden, da bereits ein Training läuft")
-            return {
-                'success': False,
-                'error': "Es läuft bereits ein Training",
-                'model_name': model_name
+        # Standard-Feature-Konfiguration
+        default_config = {
+            'price_features': {
+                'enabled': True,
+                'ema': [8, 21, 55, 200],
+                'sma': [10, 20, 50, 100],
+                'returns': [1, 3, 5, 10],
+                'log_returns': True
+            },
+            'volume_features': {
+                'enabled': True,
+                'vwap': True,
+                'volume_ema': [8, 20],
+                'volume_oscillators': True
+            },
+            'volatility_features': {
+                'enabled': True,
+                'atr_periods': [7, 14, 28],
+                'bollinger_bands': {
+                    'periods': [20],
+                    'deviations': [2.0]
+                }
+            },
+            'momentum_features': {
+                'enabled': True,
+                'rsi_periods': [7, 14, 21],
+                'macd': {
+                    'fast': 12,
+                    'slow': 26,
+                    'signal': 9
+                },
+                'stochastic': {
+                    'k': 14,
+                    'd': 3,
+                    'smooth': 3
+                }
+            },
+            'pattern_features': {
+                'enabled': True,
+                'candlestick_patterns': True,
+                'support_resistance': True
+            },
+            'market_features': {
+                'enabled': True,
+                'market_correlation': True,
+                'sector_momentum': True
             }
-
-        if not self.data_pipeline:
-            self.logger.error("Keine Datenpipeline verfügbar, Training nicht möglich")
-            return {
-                'success': False,
-                'error': "Keine Datenpipeline verfügbar",
-                'model_name': model_name
-            }
-
-        # Features festlegen
-        if features is None:
-            features = self.default_features
-
-        # Daten vorbereiten
-        try:
-            # Zeitraum festlegen, falls nicht angegeben
-            if not end_date:
-                end_date = datetime.now().strftime('%Y-%m-%d')
-            if not start_date:
-                # Start-Datum basierend auf Backtest-Tagen berechnen
-                start_date = (datetime.now() - timedelta(days=self.backtest_days*2)).strftime('%Y-%m-%d')
-
-            # Training in separatem Thread starten
-            self.is_training = True
-            self.training_count += 1
-            
-            # Status an Telegram senden, falls verfügbar
-            if self.telegram_interface:
-                self.telegram_interface.send_notification(
-                    title="Modell-Training gestartet",
-                    message=f"Training für Modell {model_name} ({symbol}, {timeframe}) wurde gestartet.",
-                    priority="low"
-                )
-            
-            self.training_thread = threading.Thread(
-                target=self._train_model_thread,
-                args=(model_name, symbol, timeframe, features, start_date, end_date, model_type, target_metric),
-                daemon=True
-            )
-            
-            self.training_thread.start()
-            
-            self.logger.info(f"Training für Modell {model_name} gestartet (Symbol: {symbol}, Timeframe: {timeframe})")
-            
-            return {
-                'success': True,
-                'message': f"Training für Modell {model_name} gestartet",
-                'model_name': model_name,
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'model_type': model_type
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Fehler beim Starten des Trainings für {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            self.is_training = False
-            
-            return {
-                'success': False,
-                'error': str(e),
-                'model_name': model_name
-            }
-
-    def _train_model_thread(self, model_name: str, symbol: str, timeframe: str,
-                           features: List[str], start_date: str, end_date: str,
-                           model_type: str, target_metric: str):
-        """
-        Thread-Funktion für das Training eines Modells.
-
-        Args:
-            model_name: Name des Modells
-            symbol: Handelssymbol
-            timeframe: Zeitrahmen
-            features: Liste von Features
-            start_date: Startdatum
-            end_date: Enddatum
-            model_type: Typ des Modells
-            target_metric: Zielmetrik
-        """
-        start_time = time.time()
-        result = {
-            'success': False,
-            'model_name': model_name,
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'model_type': model_type,
-            'target_metric': target_metric,
-            'training_duration': 0,
-            'timestamp': datetime.now().isoformat()
         }
         
-        try:
-            self.logger.info(f"Training-Thread für {model_name} gestartet")
-            
-            # Daten laden
-            df = self._load_and_prepare_data(symbol, timeframe, start_date, end_date)
-            if df is None or df.empty:
-                error_msg = f"Keine Daten für {symbol} ({timeframe}) verfügbar"
-                self.logger.error(error_msg)
-                result['error'] = error_msg
-                self._notify_training_complete_callbacks(result)
-                return
-            
-            # Features und Zielvariable vorbereiten
-            X, y = self._prepare_features_and_target(df, features, target_metric)
-            if X is None or y is None:
-                error_msg = f"Fehler bei der Feature-Vorbereitung für {symbol}"
-                self.logger.error(error_msg)
-                result['error'] = error_msg
-                self._notify_training_complete_callbacks(result)
-                return
-            
-            # Info über Datenform loggen
-            self.logger.info(f"Training mit {X.shape[0]} Datenpunkten und {X.shape[1]} Features")
-            
-            # Trainings- und Testdaten aufteilen
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=self.validation_split, shuffle=False)
-            
-            # Ensemble-Modell trainieren, wenn gewünscht
-            if model_type == 'ensemble' and self.enable_ensemble:
-                model, train_metrics = self._train_ensemble_model(X_train, y_train, X_test, y_test, features)
+        # Benutzerdefinierte Konfiguration aus Config-Datei übernehmen
+        user_config = self.config.get('feature_config', {})
+        
+        # Konfigurationen zusammenführen
+        result_config = default_config.copy()
+        self._merge_config_recursive(result_config, user_config)
+        
+        return result_config
+    
+    def _merge_config_recursive(self, base_config: Dict, override_config: Dict) -> None:
+        """
+        Führt zwei Konfigurationen rekursiv zusammen.
+        
+        Args:
+            base_config: Basis-Konfiguration
+            override_config: Überschreibende Konfiguration
+        """
+        for key, value in override_config.items():
+            if key in base_config and isinstance(base_config[key], dict) and isinstance(value, dict):
+                self._merge_config_recursive(base_config[key], value)
             else:
-                # Einzelnes Modell trainieren
-                model, train_metrics = self._train_specific_model(model_type, X_train, y_train, X_test, y_test)
-            
-            if model is None:
-                error_msg = f"Fehler beim Training des Modells {model_name}"
-                self.logger.error(error_msg)
-                result['error'] = error_msg
-                self._notify_training_complete_callbacks(result)
-                return
-            
-            # Modell speichern
-            self._save_model(model_name, model, model_type)
-            
-            # Training-Dauer berechnen
-            training_duration = time.time() - start_time
-            
-            # Performance-Metriken speichern
-            self.performance_metrics[model_name] = {
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'model_type': model_type,
-                'target': target_metric,
-                'features': features,
-                'train_metrics': train_metrics,
-                'training_duration': training_duration,
-                'last_updated': datetime.now().isoformat(),
-                'data_points': X.shape[0],
-                'feature_count': X.shape[1]
-            }
-            
-            self.successful_training_count += 1
-            self.logger.info(f"Training für {model_name} abgeschlossen. Dauer: {training_duration:.1f}s, Metriken: {train_metrics}")
-            
-            # Erfolg im Ergebnisdictionary vermerken
-            result['success'] = True
-            result['train_metrics'] = train_metrics
-            result['training_duration'] = training_duration
-            
-            # Benachrichtigung senden, falls Telegram verfügbar
-            if self.telegram_interface:
-                accuracy = train_metrics.get('accuracy', 0)
-                self.telegram_interface.send_notification(
-                    title="Modell-Training abgeschlossen",
-                    message=(
-                        f"Training für Modell {model_name} ({symbol}, {timeframe}) erfolgreich abgeschlossen.\n"
-                        f"Typ: {model_type}\n"
-                        f"Genauigkeit: {accuracy:.2%}\n"
-                        f"Dauer: {training_duration:.1f}s"
-                    ),
-                    priority="normal"
-                )
-            
-            # Backtesting durchführen
-            self.backtest_model(model_name)
-            
-        except Exception as e:
-            self.logger.error(f"Fehler im Training Thread für {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            result['error'] = str(e)
-            
-            # Benachrichtigung über Fehler senden
-            if self.telegram_interface:
-                self.telegram_interface.send_notification(
-                    title="Fehler beim Modell-Training",
-                    message=f"Training für Modell {model_name} ({symbol}, {timeframe}) fehlgeschlagen: {str(e)}",
-                    priority="high"
-                )
-        finally:
-            self.is_training = False
-            self._notify_training_complete_callbacks(result)
-
-    def _train_ensemble_model(self, X_train, y_train, X_test, y_test, features):
+                base_config[key] = value
+    
+    def preprocess_data(self, symbol: str, timeframe: str, days: int = None) -> pd.DataFrame:
         """
-        Trainiert ein Ensemble-Modell, das mehrere Modelltypen kombiniert.
+        Verarbeitet historische Daten für ein Symbol und einen Zeitrahmen.
         
         Args:
-            X_train: Trainings-Features
-            y_train: Trainings-Ziele
-            X_test: Test-Features
-            y_test: Test-Ziele
-            features: Feature-Namen
-            
+            symbol: Handelssymbol (z.B. 'BTC/USDT')
+            timeframe: Zeitrahmen ('1m', '5m', '15m', '1h', '4h', '1d')
+            days: Anzahl der Tage für historische Daten (optional)
+        
         Returns:
-            Tuple aus trainiertem Modell und Metrik-Dictionary
+            DataFrame mit verarbeiteten Daten oder None bei Fehler
         """
-        self.logger.info("Training eines Ensemble-Modells gestartet")
-        
-        models = []
-        model_weights = []
-        
-        # Liste der zu trainierenden Modelle
-        model_types = ['random_forest', 'gradient_boosting']
-        if tf.config.list_physical_devices('GPU'):
-            model_types.append('lstm')  # LSTM nur bei vorhandener GPU hinzufügen
-        
-        # Jedes Modell einzeln trainieren
-        for model_type in model_types:
-            try:
-                model, metrics = self._train_specific_model(model_type, X_train, y_train, X_test, y_test)
-                if model is not None:
-                    models.append((model_type, model))
-                    # Gewichtung basierend auf Genauigkeit
-                    model_weights.append(metrics.get('accuracy', 0.5))
-                    self.logger.info(f"Modell {model_type} für Ensemble mit Genauigkeit {metrics.get('accuracy', 0):.4f} trainiert")
-            except Exception as e:
-                self.logger.error(f"Fehler beim Training des {model_type}-Modells für Ensemble: {str(e)}")
-        
-        if not models:
-            self.logger.error("Keine Modelle für Ensemble verfügbar")
-            return None, {}
-        
-        # Gewichte normalisieren
-        total_weight = sum(model_weights)
-        if total_weight > 0:
-            model_weights = [w/total_weight for w in model_weights]
-        else:
-            # Gleiche Gewichtung, falls Genauigkeiten nicht verfügbar
-            model_weights = [1.0/len(models) for _ in models]
-        
-        # Ensemble-Modell erstellen
-        ensemble = {
-            'models': models,
-            'weights': model_weights
-        }
-        
-        # Ensemble auf Testdaten evaluieren
-        ensemble_predictions = self._ensemble_predict(ensemble, X_test)
-        
-        # Metriken berechnen
-        metrics = {
-            'accuracy': accuracy_score(y_test, ensemble_predictions),
-            'precision': precision_score(y_test, ensemble_predictions, average='weighted'),
-            'recall': recall_score(y_test, ensemble_predictions, average='weighted'),
-            'f1': f1_score(y_test, ensemble_predictions, average='weighted'),
-            'ensemble_weights': dict(zip([m[0] for m in models], model_weights)),
-            'ensemble_size': len(models)
-        }
-        
-        self.logger.info(f"Ensemble-Training abgeschlossen, Genauigkeit: {metrics['accuracy']:.4f}")
-        
-        return ensemble, metrics
-
-    def _ensemble_predict(self, ensemble, X):
-        """
-        Erstellt Vorhersagen mit einem Ensemble-Modell.
-        
-        Args:
-            ensemble: Das Ensemble-Modell
-            X: Eingabedaten
-            
-        Returns:
-            Array mit Vorhersagen
-        """
-        predictions = []
-        weights = []
-        
-        # Vorhersagen von jedem Modell sammeln
-        for i, (model_type, model) in enumerate(ensemble['models']):
-            try:
-                weight = ensemble['weights'][i]
-                
-                if model_type == 'lstm':
-                    X_reshaped = X.reshape((X.shape[0], X.shape[1], 1))
-                    y_pred_proba = model.predict(X_reshaped)
-                    y_pred = (y_pred_proba > 0.5).astype(int).flatten()
-                else:
-                    y_pred = model.predict(X)
-                
-                predictions.append(y_pred)
-                weights.append(weight)
-            except Exception as e:
-                self.logger.error(f"Fehler bei Ensemble-Vorhersage für Modell {model_type}: {str(e)}")
-        
-        if not predictions:
+        if not self.data_pipeline:
+            self.logger.error("Keine Datenpipeline verfügbar")
             return None
         
-        # Gewichtete Mehrheitsentscheidung
-        weighted_votes = np.zeros(X.shape[0])
-        for i, pred in enumerate(predictions):
-            weighted_votes += pred * weights[i]
-        
-        # Mehrheitsentscheidung (> 0.5 nach Gewichtung)
-        final_predictions = (weighted_votes > 0.5).astype(int)
-        
-        return final_predictions
-
-    def _load_and_prepare_data(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """
-        Lädt und bereitet Daten für das Training vor.
-
-        Args:
-            symbol: Handelssymbol
-            timeframe: Zeitrahmen
-            start_date: Startdatum
-            end_date: Enddatum
-
-        Returns:
-            DataFrame mit vorbereiteten Daten oder None bei Fehler
-        """
         try:
-            self.logger.info(f"Lade Daten für {symbol} von {start_date} bis {end_date} (Timeframe: {timeframe})")
+            # Bestimme die Anzahl der benötigten Datenpunkte
+            days_to_fetch = days or self.backtest_days
             
-            # Daten über die Datenpipeline laden
-            df = self.data_pipeline.fetch_crypto_data(symbol, start_date, end_date, timeframe)
+            # Heuristik für die Anzahl der Datenpunkte basierend auf Timeframe
+            points_per_day = {
+                '1m': 1440, '5m': 288, '15m': 96, '30m': 48,
+                '1h': 24, '2h': 12, '4h': 6, '6h': 4, '1d': 1
+            }
+            limit = days_to_fetch * (points_per_day.get(timeframe, 24) + 10)  # Extras für Sicherheit
             
-            if df is None or df.empty:
-                self.logger.error(f"Keine Daten für {symbol} im Zeitraum {start_date} bis {end_date} verfügbar")
+            # Daten abrufen
+            historical_data = self.data_pipeline.get_crypto_data(
+                symbol, timeframe=timeframe, limit=limit
+            )
+            
+            if historical_data is None or historical_data.empty:
+                self.logger.warning(f"Keine Daten für {symbol} ({timeframe}) verfügbar")
                 return None
             
-            self.logger.info(f"Daten geladen: {len(df)} Datenpunkte")
+            # Daten aufbereiten und Features berechnen
+            processed_data = self._generate_features(historical_data)
             
-            # Prüfen, ob genügend Daten für Training vorhanden sind
-            min_data_points = 100
-            if len(df) < min_data_points:
-                self.logger.error(f"Zu wenige Datenpunkte für {symbol}: {len(df)} < {min_data_points}")
+            # Auf Vollständigkeit prüfen
+            if processed_data is None or processed_data.empty:
+                self.logger.warning(f"Verarbeitete Daten für {symbol} ({timeframe}) sind leer")
                 return None
             
-            # Technische Indikatoren hinzufügen
-            indicators = [
-                {'type': 'rsi', 'period': 14},
-                {'type': 'ema', 'period': 9},
-                {'type': 'ema', 'period': 21},
-                {'type': 'macd', 'fast_period': 12, 'slow_period': 26, 'signal_period': 9},
-                {'type': 'bollinger', 'period': 20, 'std_dev': 2},
-                {'type': 'atr', 'period': 14},
-                {'type': 'vwap', 'period': 14},
-                {'type': 'adx', 'period': 14},
-                {'type': 'obv'},
-                {'type': 'cci', 'period': 20}
-            ]
+            # Filtern der Daten auf den gewünschten Zeitraum
+            if days:
+                start_date = pd.Timestamp.now() - pd.Timedelta(days=days)
+                processed_data = processed_data[processed_data.index >= start_date]
             
-            df = self.data_pipeline.get_indicators(df, indicators)
+            self.logger.info(f"Daten für {symbol} ({timeframe}) verarbeitet: {len(processed_data)} Datenpunkte")
+            return processed_data
+            
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Datenverarbeitung für {symbol} ({timeframe}): {str(e)}")
+            return None
+    
+    def _generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generiert technische Indikatoren und Features aus den OHLCV-Daten.
+        
+        Args:
+            df: DataFrame mit OHLCV-Daten
+        
+        Returns:
+            DataFrame mit technischen Indikatoren und Features
+        """
+        if df is None or df.empty:
+            return None
+        
+        try:
+            # Tiefe Kopie um die Originaldaten nicht zu verändern
+            result = df.copy()
+            
+            # Stelle sicher, dass alle erforderlichen Spalten vorhanden sind
+            required_columns = ['open', 'high', 'low', 'close', 'volume']
+            if not all(col in df.columns for col in required_columns):
+                self.logger.error(f"Erforderliche Spalten fehlen: {[col for col in required_columns if col not in df.columns]}")
+                return None
+            
+            # 1. Preis-Features
+            if self.feature_config['price_features']['enabled']:
+                # Exponential Moving Averages
+                for period in self.feature_config['price_features']['ema']:
+                    result[f'ema_{period}'] = ta.EMA(result['close'], timeperiod=period)
+                
+                # Simple Moving Averages
+                for period in self.feature_config['price_features']['sma']:
+                    result[f'sma_{period}'] = ta.SMA(result['close'], timeperiod=period)
+                
+                # Relative Veränderungen (Returns)
+                for period in self.feature_config['price_features']['returns']:
+                    result[f'return_{period}'] = result['close'].pct_change(period)
+                
+                # Logarithmische Returns
+                if self.feature_config['price_features']['log_returns']:
+                    result['log_return_1'] = np.log(result['close'] / result['close'].shift(1))
+            
+            # 2. Volumen-Features
+            if self.feature_config['volume_features']['enabled']:
+                # Volume Weighted Average Price
+                if self.feature_config['volume_features']['vwap']:
+                    result['vwap'] = (result['volume'] * result['close']).cumsum() / result['volume'].cumsum()
+                
+                # Volume EMAs
+                for period in self.feature_config['volume_features']['volume_ema']:
+                    result[f'volume_ema_{period}'] = ta.EMA(result['volume'], timeperiod=period)
+                
+                # Volume Oszillatoren
+                if self.feature_config['volume_features']['volume_oscillators']:
+                    result['volume_change'] = result['volume'].pct_change()
+                    result['volume_obv'] = ta.OBV(result['close'], result['volume'])
+            
+            # 3. Volatilitäts-Features
+            if self.feature_config['volatility_features']['enabled']:
+                # Average True Range
+                for period in self.feature_config['volatility_features']['atr_periods']:
+                    result[f'atr_{period}'] = ta.ATR(result['high'], result['low'], result['close'], timeperiod=period)
+                
+                # Bollinger Bands
+                for period in self.feature_config['volatility_features']['bollinger_bands']['periods']:
+                    for dev in self.feature_config['volatility_features']['bollinger_bands']['deviations']:
+                        upper, middle, lower = ta.BBANDS(
+                            result['close'], 
+                            timeperiod=period, 
+                            nbdevup=dev, 
+                            nbdevdn=dev, 
+                            matype=0
+                        )
+                        result[f'bb_upper_{period}_{int(dev)}'] = upper
+                        result[f'bb_middle_{period}_{int(dev)}'] = middle
+                        result[f'bb_lower_{period}_{int(dev)}'] = lower
+                        # Prozentuale Lage im Band
+                        result[f'bb_pct_{period}_{int(dev)}'] = (result['close'] - lower) / (upper - lower)
+            
+            # 4. Momentum-Features
+            if self.feature_config['momentum_features']['enabled']:
+                # Relative Strength Index
+                for period in self.feature_config['momentum_features']['rsi_periods']:
+                    result[f'rsi_{period}'] = ta.RSI(result['close'], timeperiod=period)
+                
+                # MACD
+                macd_config = self.feature_config['momentum_features']['macd']
+                macd, macd_signal, macd_hist = ta.MACD(
+                    result['close'], 
+                    fastperiod=macd_config['fast'], 
+                    slowperiod=macd_config['slow'], 
+                    signalperiod=macd_config['signal']
+                )
+                result['macd'] = macd
+                result['macd_signal'] = macd_signal
+                result['macd_hist'] = macd_hist
+                
+                # Stochastischer Oszillator
+                stoch_config = self.feature_config['momentum_features']['stochastic']
+                slowk, slowd = ta.STOCH(
+                    result['high'], 
+                    result['low'], 
+                    result['close'], 
+                    fastk_period=stoch_config['k'], 
+                    slowk_period=stoch_config['smooth'], 
+                    slowk_matype=0, 
+                    slowd_period=stoch_config['d'], 
+                    slowd_matype=0
+                )
+                result['stoch_k'] = slowk
+                result['stoch_d'] = slowd
+            
+            # 5. Pattern-Features
+            if self.feature_config['pattern_features']['enabled']:
+                if self.feature_config['pattern_features']['candlestick_patterns']:
+                    # Wichtige Candlestick-Muster
+                    result['cdl_doji'] = ta.CDLDOJI(result['open'], result['high'], result['low'], result['close'])
+                    result['cdl_hammer'] = ta.CDLHAMMER(result['open'], result['high'], result['low'], result['close'])
+                    result['cdl_engulfing'] = ta.CDLENGULFING(result['open'], result['high'], result['low'], result['close'])
+                    result['cdl_evening_star'] = ta.CDLEVENINGSTAR(result['open'], result['high'], result['low'], result['close'])
+                    result['cdl_morning_star'] = ta.CDLMORNINGSTAR(result['open'], result['high'], result['low'], result['close'])
+            
+            # Ziel-Features für Prognosen hinzufügen (Zukünftige Preisänderungen)
+            for forward_period in [1, 3, 6, 12, 24]:
+                # Zukünftige absolute Preisänderung
+                result[f'future_change_{forward_period}'] = result['close'].shift(-forward_period) - result['close']
+                
+                # Zukünftige prozentuale Preisänderung
+                result[f'future_pct_{forward_period}'] = (result['close'].shift(-forward_period) / result['close'] - 1) * 100
+                
+                # Binäres Label (1 für Aufwärtstrend, 0 für Abwärtstrend)
+                result[f'future_direction_{forward_period}'] = (result[f'future_pct_{forward_period}'] > 0).astype(int)
             
             # NaN-Werte entfernen
-            original_size = len(df)
-            df = df.dropna()
-            dropped_rows = original_size - len(df)
-            if dropped_rows > 0:
-                self.logger.info(f"{dropped_rows} Zeilen mit NaN-Werten entfernt")
-            
-            # Zukünftige Preisänderungen berechnen (für die Zielwerte)
-            df['next_close'] = df['close'].shift(-1)
-            df['price_change'] = df['next_close'] - df['close']
-            df['returns'] = df['price_change'] / df['close']
-            df['direction'] = (df['returns'] > 0).astype(int)
-            
-            # Volatilität berechnen
-            df['volatility'] = df['close'].pct_change().rolling(window=5).std()
-            
-            # Extremwerte entfernen
-            for col in df.columns:
-                if col in ['timestamp', 'direction']:
-                    continue
-                q_low = df[col].quantile(0.005)
-                q_high = df[col].quantile(0.995)
-                df[col] = df[col].clip(q_low, q_high)
-            
-            # Weitere Feature-Engineering
-            df['gap'] = (df['open'] - df['close'].shift(1)) / df['close'].shift(1)
-            df['body_ratio'] = abs(df['close'] - df['open']) / (df['high'] - df['low'])
-            df['upper_shadow'] = (df['high'] - df[['open', 'close']].max(axis=1)) / df['close']
-            df['lower_shadow'] = (df[['open', 'close']].min(axis=1) - df['low']) / df['close']
-            
-            # NaNs noch einmal entfernen (falls durch Feature-Engineering entstanden)
-            df = df.dropna()
-            
-            self.logger.info(f"Daten vorbereitet: {len(df)} verbleibende Datenpunkte")
-            
-            return df
-            
-        except Exception as e:
-            self.logger.error(f"Fehler beim Laden und Vorbereiten der Daten für {symbol}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return None
-
-    def _prepare_features_and_target(self, df: pd.DataFrame, features: List[str], target_metric: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        Bereitet Features und Zielvariable aus dem DataFrame vor.
-
-        Args:
-            df: DataFrame mit Daten
-            features: Liste von Feature-Spalten
-            target_metric: Zielmetrik ('direction', 'volatility', 'return')
-
-        Returns:
-            Tuple aus Feature-Matrix und Ziel-Array oder (None, None) bei Fehler
-        """
-        try:
-            # Prüfen, ob alle Features im DataFrame vorhanden sind
-            missing_features = [f for f in features if f not in df.columns]
-            if missing_features:
-                self.logger.error(f"Fehlende Features im DataFrame: {missing_features}")
-                # Versuche, ohne die fehlenden Features fortzufahren
-                features = [f for f in features if f in df.columns]
-                if not features:
-                    return None, None
-                self.logger.warning(f"Setze Training mit verbleibenden {len(features)} Features fort")
-            
-            # Features extrahieren
-            X = df[features].values
-            
-            # Feature-Normalisierung
-            scaler = StandardScaler()
-            X = scaler.fit_transform(X)
-            
-            # Zielvariable extrahieren
-            if target_metric == 'direction':
-                y = df['direction'].values
-            elif target_metric == 'volatility':
-                # Diskretisiere Volatilität in Klassen (hoch/niedrig)
-                volatility_threshold = df['volatility'].quantile(0.7)
-                y = (df['volatility'] > volatility_threshold).astype(int).values
-            elif target_metric == 'return':
-                # Diskretisiere Returns in Klassen
-                y = pd.qcut(df['returns'], q=3, labels=[0, 1, 2]).astype(int).values
-            else:
-                self.logger.error(f"Ungültige Zielmetrik: {target_metric}")
-                return None, None
-            
-            return X, y
-            
-        except Exception as e:
-            self.logger.error(f"Fehler bei der Feature-Vorbereitung: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return None, None
-
-    def _train_specific_model(self, model_type: str, X_train: np.ndarray, y_train: np.ndarray,
-                             X_test: np.ndarray, y_test: np.ndarray) -> Tuple[Any, Dict[str, float]]:
-        """
-        Trainiert ein spezifisches Modell basierend auf dem angegebenen Typ.
-
-        Args:
-            model_type: Typ des Modells ('random_forest', 'gradient_boosting', 'lstm')
-            X_train: Trainings-Features
-            y_train: Trainings-Ziele
-            X_test: Test-Features
-            y_test: Test-Ziele
-
-        Returns:
-            Tuple aus trainiertem Modell und Metrik-Dictionary
-        """
-        model = None
-        metrics = {}
-        
-        try:
-            self.logger.info(f"Training eines {model_type}-Modells gestartet")
-            
-            if model_type == 'random_forest':
-                # Parameter-Optimierung, falls aktiviert
-                if self.auto_optimize_hyperparams:
-                    param_grid = {
-                        'n_estimators': [50, 100, 200],
-                        'max_depth': [5, 10, 15, None],
-                        'min_samples_split': [2, 5, 10],
-                        'min_samples_leaf': [1, 2, 4]
-                    }
-                    self.logger.info("Führe Hyperparameter-Optimierung für RandomForest durch")
-                    grid_search = GridSearchCV(
-                        RandomForestClassifier(random_state=42, n_jobs=-1),
-                        param_grid,
-                        cv=3,
-                        scoring='accuracy',
-                        n_jobs=-1
-                    )
-                    grid_search.fit(X_train, y_train)
-                    best_params = grid_search.best_params_
-                    self.logger.info(f"Beste Parameter für RandomForest: {best_params}")
-                    
-                    # Modell mit besten Parametern trainieren
-                    model = RandomForestClassifier(
-                        **best_params,
-                        random_state=42,
-                        n_jobs=-1
-                    )
-                else:
-                    # StandardParameterkonfiguration
-                    model = RandomForestClassifier(
-                        n_estimators=100,
-                        max_depth=10,
-                        random_state=42,
-                        n_jobs=-1
-                    )
-                
-                model.fit(X_train, y_train)
-                
-                # Vorhersagen und Metriken berechnen
-                y_pred = model.predict(X_test)
-                metrics['accuracy'] = accuracy_score(y_test, y_pred)
-                metrics['precision'] = precision_score(y_test, y_pred, average='weighted')
-                metrics['recall'] = recall_score(y_test, y_pred, average='weighted')
-                metrics['f1'] = f1_score(y_test, y_pred, average='weighted')
-                
-                # Feature-Importance
-                metrics['feature_importance'] = model.feature_importances_.tolist()
-                
-            elif model_type == 'gradient_boosting':
-                # Parameter-Optimierung, falls aktiviert
-                if self.auto_optimize_hyperparams:
-                    param_grid = {
-                        'n_estimators': [50, 100, 200],
-                        'learning_rate': [0.05, 0.1, 0.2],
-                        'max_depth': [3, 5, 7],
-                        'min_samples_split': [2, 5, 10]
-                    }
-                    self.logger.info("Führe Hyperparameter-Optimierung für GradientBoosting durch")
-                    grid_search = GridSearchCV(
-                        GradientBoostingClassifier(random_state=42),
-                        param_grid,
-                        cv=3,
-                        scoring='accuracy',
-                        n_jobs=-1
-                    )
-                    grid_search.fit(X_train, y_train)
-                    best_params = grid_search.best_params_
-                    self.logger.info(f"Beste Parameter für GradientBoosting: {best_params}")
-                    
-                    # Modell mit besten Parametern trainieren
-                    model = GradientBoostingClassifier(
-                        **best_params,
-                        random_state=42
-                    )
-                else:
-                    # Standardparameterkonfiguration
-                    model = GradientBoostingClassifier(
-                        n_estimators=100,
-                        learning_rate=0.1,
-                        max_depth=5,
-                        random_state=42
-                    )
-                
-                model.fit(X_train, y_train)
-                
-                # Vorhersagen und Metriken berechnen
-                y_pred = model.predict(X_test)
-                metrics['accuracy'] = accuracy_score(y_test, y_pred)
-                metrics['precision'] = precision_score(y_test, y_pred, average='weighted')
-                metrics['recall'] = recall_score(y_test, y_pred, average='weighted')
-                metrics['f1'] = f1_score(y_test, y_pred, average='weighted')
-                
-                # Feature-Importance
-                metrics['feature_importance'] = model.feature_importances_.tolist()
-                
-            elif model_type == 'lstm':
-                # Für LSTM GPU-Verfügbarkeit prüfen
-                if not tf.config.list_physical_devices('GPU'):
-                    self.logger.warning("Keine GPU gefunden. LSTM-Training kann langsam sein.")
-                
-                # LSTM-Modell erstellen
-                input_shape = (X_train.shape[1], 1)
-                X_train_reshaped = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
-                X_test_reshaped = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
-                
-                # Modellarchitektur basierend auf Datengröße anpassen
-                if X_train.shape[0] > 5000:  # Größerer Datensatz = Komplexeres Modell
-                    units1, units2 = 64, 32
-                    dropout_rate = 0.3
-                else:  # Kleinerer Datensatz = Einfacheres Modell
-                    units1, units2 = 32, 16
-                    dropout_rate = 0.2
-                
-                model = Sequential([
-                    LSTM(units1, return_sequences=True, input_shape=input_shape),
-                    Dropout(dropout_rate),
-                    LSTM(units2, return_sequences=False),
-                    Dropout(dropout_rate),
-                    BatchNormalization(),
-                    Dense(16, activation='relu'),
-                    Dense(1, activation='sigmoid')
-                ])
-                
-                model.compile(
-                    optimizer=Adam(learning_rate=0.001),
-                    loss='binary_crossentropy',
-                    metrics=['accuracy']
-                )
-                
-                # Callbacks für das Training
-                callbacks = []
-                
-                if self.early_stopping:
-                    early_stopping = EarlyStopping(
-                        monitor='val_loss',
-                        patience=self.patience,
-                        restore_best_weights=True
-                    )
-                    callbacks.append(early_stopping)
-                
-                reduce_lr = ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,
-                    patience=5,
-                    min_lr=0.0001
-                )
-                callbacks.append(reduce_lr)
-                
-                # Modell trainieren
-                history = model.fit(
-                    X_train_reshaped,
-                    y_train,
-                    epochs=self.epochs,
-                    batch_size=self.batch_size,
-                    validation_split=self.validation_split,
-                    callbacks=callbacks,
-                    verbose=1
-                )
-                
-                # Vorhersagen und Metriken berechnen
-                y_pred_proba = model.predict(X_test_reshaped)
-                y_pred = (y_pred_proba > 0.5).astype(int).flatten()
-                
-                metrics['accuracy'] = accuracy_score(y_test, y_pred)
-                metrics['precision'] = precision_score(y_test, y_pred, average='weighted')
-                metrics['recall'] = recall_score(y_test, y_pred, average='weighted')
-                metrics['f1'] = f1_score(y_test, y_pred, average='weighted')
-                
-                # Trainingsverlauf
-                metrics['training_history'] = {
-                    'loss': [float(x) for x in history.history['loss']],
-                    'val_loss': [float(x) for x in history.history['val_loss']],
-                    'accuracy': [float(x) for x in history.history['accuracy']],
-                    'val_accuracy': [float(x) for x in history.history['val_accuracy']]
-                }
-            else:
-                self.logger.error(f"Unbekannter Modelltyp: {model_type}")
-                return None, {}
-            
-            self.logger.info(f"{model_type}-Modell erfolgreich trainiert, Genauigkeit: {metrics.get('accuracy', 0):.4f}")
-            return model, metrics
-            
-        except Exception as e:
-            self.logger.error(f"Fehler beim Training des {model_type}-Modells: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return None, {}
-
-    def _save_model(self, model_name: str, model: Any, model_type: str) -> bool:
-        """
-        Speichert ein trainiertes Modell.
-
-        Args:
-            model_name: Name des Modells
-            model: Trainiertes Modell
-            model_type: Typ des Modells
-
-        Returns:
-            True bei Erfolg, False bei Fehler
-        """
-        try:
-            # Modell im Speicher cachen
-            self.models[model_name] = model
-            
-            # Modell auf Festplatte speichern
-            if model_type == 'lstm':
-                # TensorFlow-Modell speichern
-                model_path = self.models_path / model_name
-                save_model(model, model_path)
-            elif model_type == 'ensemble':
-                # Ensemble-Modell speichern
-                model_path = self.models_path / f"{model_name}_{model_type}.pkl"
-                
-                # Wir müssen TensorFlow-Modelle separat speichern
-                ensemble_save = {
-                    'weights': model['weights'],
-                    'models': []
-                }
-                
-                for i, (submodel_type, submodel) in enumerate(model['models']):
-                    if submodel_type == 'lstm':
-                        # TensorFlow-Modell separat speichern
-                        submodel_path = self.models_path / f"{model_name}_ensemble_{i}"
-                        save_model(submodel, submodel_path)
-                        # Referenz zum gespeicherten Modell
-                        ensemble_save['models'].append((submodel_type, str(submodel_path)))
-                    else:
-                        # Normales Modell im Ensemble speichern
-                        ensemble_save['models'].append((submodel_type, submodel))
-                
-                with open(model_path, 'wb') as f:
-                    pickle.dump(ensemble_save, f)
-            else:
-                # Sklearn-Modell speichern
-                model_path = self.models_path / f"{model_name}_{model_type}.pkl"
-                with open(model_path, 'wb') as f:
-                    pickle.dump(model, f)
-                    
-            self.logger.info(f"Modell {model_name} gespeichert unter {model_path}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Fehler beim Speichern des Modells {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return False
-
-    def load_model(self, model_name: str) -> Any:
-        """
-        Lädt ein trainiertes Modell.
-
-        Args:
-            model_name: Name des zu ladenden Modells
-
-        Returns:
-            Geladenes Modell oder None bei Fehler
-        """
-        # Prüfen, ob das Modell bereits im Speicher ist
-        if model_name in self.models:
-            return self.models[model_name]
-            
-        try:
-            # Versuche, das Modell von der Festplatte zu laden
-            # Prüfe zunächst, ob es ein LSTM-Modell ist
-            lstm_path = self.models_path / model_name
-            if lstm_path.exists():
-                self.logger.info(f"Lade LSTM-Modell {model_name}")
-                model = load_model(lstm_path)
-                self.models[model_name] = model
-                return model
-                
-            # Prüfe auf Ensemble-Modell
-            ensemble_path = self.models_path / f"{model_name}_ensemble.pkl"
-            if ensemble_path.exists():
-                self.logger.info(f"Lade Ensemble-Modell {model_name}")
-                with open(ensemble_path, 'rb') as f:
-                    ensemble_save = pickle.load(f)
-                
-                # Ensemble rekonstruieren
-                ensemble = {
-                    'weights': ensemble_save['weights'],
-                    'models': []
-                }
-                
-                for submodel_type, submodel_ref in ensemble_save['models']:
-                    if submodel_type == 'lstm':
-                        # TensorFlow-Modell laden
-                        submodel = load_model(submodel_ref)
-                    else:
-                        # Bereits gespeichertes Sklearn-Modell
-                        submodel = submodel_ref
-                    
-                    ensemble['models'].append((submodel_type, submodel))
-                
-                self.models[model_name] = ensemble
-                return ensemble
-                
-            # Suche nach Sklearn-Modellen
-            for model_type in ['random_forest', 'gradient_boosting']:
-                model_path = self.models_path / f"{model_name}_{model_type}.pkl"
-                if model_path.exists():
-                    self.logger.info(f"Lade {model_type}-Modell {model_name}")
-                    with open(model_path, 'rb') as f:
-                        model = pickle.load(f)
-                    self.models[model_name] = model
-                    return model
-            
-            self.logger.warning(f"Kein Modell mit Namen {model_name} gefunden")
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Fehler beim Laden des Modells {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return None
-
-    def predict(self, model_name: str, data: Dict[str, float]) -> Dict[str, Any]:
-        """
-        Erstellt eine Vorhersage mit einem trainierten Modell.
-
-        Args:
-            model_name: Name des Modells
-            data: Dictionary mit Feature-Werten
-
-        Returns:
-            Vorhersage-Ergebnis als Dictionary
-        """
-        try:
-            model = self.load_model(model_name)
-            if model is None:
-                return {
-                    'success': False,
-                    'error': f"Modell {model_name} nicht gefunden"
-                }
-            
-            # Performance-Metriken abrufen
-            metrics = self.performance_metrics.get(model_name, {})
-            features = metrics.get('features', self.default_features)
-            model_type = metrics.get('model_type', 'unknown')
-            
-            # Prüfen, ob alle erforderlichen Features vorhanden sind
-            missing_features = [f for f in features if f not in data]
-            if missing_features:
-                return {
-                    'success': False,
-                    'error': f"Fehlende Features: {missing_features}"
-                }
-            
-            # Feature-Werte extrahieren und normalisieren
-            X = np.array([[data[f] for f in features]])
-            
-            # Normalisierung (einfache Z-Score-Normalisierung, ohne zu trainieren)
-            X = (X - np.mean(X)) / np.std(X)
-            
-            # Vorhersage basierend auf Modelltyp
-            if model_type == 'lstm':
-                X_reshaped = X.reshape((X.shape[0], X.shape[1], 1))
-                prediction = model.predict(X_reshaped)[0][0]
-                confidence = float(prediction)
-                label = 1 if prediction > 0.5 else 0
-            elif model_type == 'ensemble':
-                # Ensemble-Vorhersage
-                prediction = self._ensemble_predict(model, X)[0]
-                label = int(prediction)
-                
-                # Konfidenz für Ensemble berechnen
-                ensemble_confidences = []
-                for i, (submodel_type, submodel) in enumerate(model['models']):
-                    weight = model['weights'][i]
-                    
-                    if submodel_type == 'lstm':
-                        X_reshaped = X.reshape((X.shape[0], X.shape[1], 1))
-                        submodel_confidence = float(submodel.predict(X_reshaped)[0][0])
-                    elif hasattr(submodel, 'predict_proba'):
-                        submodel_proba = submodel.predict_proba(X)[0]
-                        submodel_confidence = float(submodel_proba[label])
-                    else:
-                        submodel_confidence = 0.5
-                    
-                    ensemble_confidences.append(submodel_confidence * weight)
-                
-                confidence = sum(ensemble_confidences)
-            else:
-                label = model.predict(X)[0]
-                # Konfidenz aus Wahrscheinlichkeiten berechnen, falls verfügbar
-                if hasattr(model, 'predict_proba'):
-                    confidence = float(model.predict_proba(X)[0][label])
-                else:
-                    confidence = None
-            
-            return {
-                'success': True,
-                'model': model_name,
-                'prediction': int(label),
-                'confidence': confidence,
-                'model_type': model_type,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Fehler bei der Vorhersage mit Modell {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return {
-                'success': False,
-                'error': str(e)
-            }
-
-    def backtest_model(self, model_name: str, symbol: Optional[str] = None,
-                      timeframe: Optional[str] = None, start_date: Optional[str] = None,
-                      end_date: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Führt einen Backtest für ein trainiertes Modell durch.
-
-        Args:
-            model_name: Name des Modells
-            symbol: Handelssymbol (optional, falls nicht im Modell gespeichert)
-            timeframe: Zeitrahmen (optional, falls nicht im Modell gespeichert)
-            start_date: Startdatum für den Backtest (optional)
-            end_date: Enddatum für den Backtest (optional)
-
-        Returns:
-            Ergebnisse des Backtests als Dictionary
-        """
-        if self.is_backtesting:
-            self.logger.warning(f"Backtest für {model_name} kann nicht gestartet werden, da bereits ein Backtest läuft")
-            return {
-                'success': False,
-                'error': "Ein anderer Backtest läuft bereits"
-            }
-        
-        if not self.data_pipeline:
-            self.logger.error("Keine Datenpipeline verfügbar, Backtesting nicht möglich")
-            return {
-                'success': False,
-                'error': "Keine Datenpipeline verfügbar"
-            }
-        
-        # Modell laden oder Fehler zurückgeben
-        model = self.load_model(model_name)
-        if model is None:
-            return {
-                'success': False,
-                'error': f"Modell {model_name} nicht gefunden"
-            }
-        
-        # Modelldetails abrufen
-        metrics = self.performance_metrics.get(model_name, {})
-        model_symbol = symbol or metrics.get('symbol')
-        model_timeframe = timeframe or metrics.get('timeframe')
-        model_type = metrics.get('model_type', 'unknown')
-        features = metrics.get('features', self.default_features)
-        
-        if not model_symbol or not model_timeframe:
-            return {
-                'success': False,
-                'error': "Symbol und Timeframe müssen entweder im Modell gespeichert oder als Parameter übergeben werden"
-            }
-        
-        # Zeitraum festlegen, falls nicht angegeben
-        if not end_date:
-            end_date = datetime.now().strftime('%Y-%m-%d')
-        if not start_date:
-            # Start-Datum basierend auf Backtest-Tagen berechnen
-            start_date = (datetime.now() - timedelta(days=self.backtest_days)).strftime('%Y-%m-%d')
-        
-        # Backtest in separatem Thread starten
-        self.is_backtesting = True
-        self.backtest_count += 1
-        
-        # Status an Telegram senden, falls verfügbar
-        if self.telegram_interface:
-            self.telegram_interface.send_notification(
-                title="Backtest gestartet",
-                message=f"Backtest für Modell {model_name} ({model_symbol}, {model_timeframe}) wurde gestartet.",
-                priority="low"
-            )
-        
-        self.backtesting_thread = threading.Thread(
-            target=self._backtest_model_thread,
-            args=(model_name, model, model_symbol, model_timeframe, features, start_date, end_date, model_type),
-            daemon=True
-        )
-        
-        self.backtesting_thread.start()
-        
-        return {
-            'success': True,
-            'message': f"Backtest für Modell {model_name} gestartet",
-            'symbol': model_symbol,
-            'timeframe': model_timeframe,
-            'period': f"{start_date} bis {end_date}"
-        }
-
-    def _backtest_model_thread(self, model_name: str, model: Any, symbol: str,
-                              timeframe: str, features: List[str], start_date: str,
-                              end_date: str, model_type: str):
-        """
-        Thread-Funktion für das Backtesting eines Modells.
-
-        Args:
-            model_name: Name des Modells
-            model: Trainiertes Modell
-            symbol: Handelssymbol
-            timeframe: Zeitrahmen
-            features: Liste von Features
-            start_date: Startdatum
-            end_date: Enddatum
-            model_type: Typ des Modells
-        """
-        backtest_result = {
-            'success': False,
-            'model_name': model_name,
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'period': f"{start_date} bis {end_date}",
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        try:
-            self.logger.info(f"Backtest für {model_name} gestartet (Symbol: {symbol}, Timeframe: {timeframe})")
-            
-            # Daten laden
-            df = self._load_and_prepare_data(symbol, timeframe, start_date, end_date)
-            if df is None or df.empty:
-                error_msg = f"Keine Daten für {symbol} ({timeframe}) verfügbar"
-                self.logger.error(error_msg)
-                backtest_result['error'] = error_msg
-                self._notify_backtest_complete_callbacks(backtest_result)
-                return
-            
-            # Features vorbereiten
-            X, y = self._prepare_features_and_target(df, features, 'direction')
-            if X is None or y is None:
-                error_msg = f"Fehler bei der Feature-Vorbereitung für {symbol}"
-                self.logger.error(error_msg)
-                backtest_result['error'] = error_msg
-                self._notify_backtest_complete_callbacks(backtest_result)
-                return
-            
-            # Vorhersagen erstellen
-            if model_type == 'lstm':
-                X_reshaped = X.reshape((X.shape[0], X.shape[1], 1))
-                predictions_prob = model.predict(X_reshaped).flatten()
-                predictions = (predictions_prob > 0.5).astype(int)
-            elif model_type == 'ensemble':
-                predictions = self._ensemble_predict(model, X)
-            else:
-                predictions = model.predict(X)
-            
-            # Ergebnisse dem DataFrame hinzufügen
-            df = df.iloc[:len(predictions)]  # Sicherstellen, dass die Längen übereinstimmen
-            df['prediction'] = predictions
-            
-            # Trading-Logik simulieren
-            df['position'] = 0
-            df['entry_price'] = None
-            df['exit_price'] = None
-            df['trade_profit'] = 0.0
-            df['stop_loss'] = None
-            df['take_profit'] = None
-            
-            position_open = False
-            entry_price = 0.0
-            entry_index = 0
-            stop_loss = 0.0
-            take_profit = 0.0
-            trade_records = []
-            
-            for i in range(1, len(df)):
-                if not position_open and df['prediction'].iloc[i-1] == 1:
-                    # Long-Position eröffnen
-                    position_open = True
-                    entry_price = df['close'].iloc[i]
-                    entry_index = i
-                    df.at[df.index[i], 'position'] = 1
-                    df.at[df.index[i], 'entry_price'] = entry_price
-                    
-                    # Stop-Loss und Take-Profit setzen
-                    if self.use_stop_loss:
-                        # ATR-basierter Stop-Loss
-                        atr = df['atr_14'].iloc[i] if 'atr_14' in df.columns else entry_price * 0.02
-                        stop_loss = entry_price - (atr * 2)  # 2 ATR für Stop-Loss
-                        take_profit = entry_price + (atr * 3)  # 3 ATR für Take-Profit (1.5:1 RRR)
-                        df.at[df.index[i], 'stop_loss'] = stop_loss
-                        df.at[df.index[i], 'take_profit'] = take_profit
-                    
-                elif position_open:
-                    # Position schließen, wenn:
-                    # 1. Vorhersage auf 0 wechselt, oder
-                    # 2. Stop-Loss getroffen, oder
-                    # 3. Take-Profit getroffen, oder
-                    # 4. Nach max. Haltezeit
-                    current_price = df['close'].iloc[i]
-                    max_hold_periods = 10  # Maximale Haltezeit
-                    hit_stop_loss = self.use_stop_loss and df['low'].iloc[i] <= stop_loss
-                    hit_take_profit = self.use_stop_loss and df['high'].iloc[i] >= take_profit
-                    prediction_changed = df['prediction'].iloc[i-1] == 0
-                    max_hold_reached = (i - entry_index) >= max_hold_periods
-                    
-                    exit_reason = None
-                    if hit_stop_loss:
-                        exit_price = stop_loss
-                        exit_reason = "stop_loss"
-                    elif hit_take_profit:
-                        exit_price = take_profit
-                        exit_reason = "take_profit"
-                    elif prediction_changed:
-                        exit_price = current_price
-                        exit_reason = "prediction_change"
-                    elif max_hold_reached:
-                        exit_price = current_price
-                        exit_reason = "max_hold"
-                    
-                    if exit_reason:
-                        # Position schließen
-                        profit_pct = (exit_price / entry_price - 1) * 100
-                        df.at[df.index[i], 'position'] = 0
-                        df.at[df.index[i], 'exit_price'] = exit_price
-                        df.at[df.index[i], 'trade_profit'] = profit_pct
-                        
-                        # Trade aufzeichnen
-                        trade = {
-                            'entry_time': df.index[entry_index],
-                            'exit_time': df.index[i],
-                            'entry_price': entry_price,
-                            'exit_price': exit_price,
-                            'profit_pct': profit_pct,
-                            'hold_periods': i - entry_index,
-                            'exit_reason': exit_reason
-                        }
-                        
-                        trade_records.append(trade)
-                        position_open = False
-                    else:
-                        df.at[df.index[i], 'position'] = 1
-            
-            # Abschließende offene Position schließen
-            if position_open:
-                exit_price = df['close'].iloc[-1]
-                profit_pct = (exit_price / entry_price - 1) * 100
-                df.at[df.index[-1], 'position'] = 0
-                df.at[df.index[-1], 'exit_price'] = exit_price
-                df.at[df.index[-1], 'trade_profit'] = profit_pct
-                
-                # Trade aufzeichnen
-                trade = {
-                    'entry_time': df.index[entry_index],
-                    'exit_time': df.index[-1],
-                    'entry_price': entry_price,
-                    'exit_price': exit_price,
-                    'profit_pct': profit_pct,
-                    'hold_periods': len(df) - 1 - entry_index,
-                    'exit_reason': 'end_of_backtest'
-                }
-                
-                trade_records.append(trade)
-            
-            # Performance-Metriken berechnen
-            trades_df = pd.DataFrame(trade_records)
-            
-            backtest_results = {
-                'model_name': model_name,
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'period': f"{start_date} bis {end_date}",
-                'total_trades': len(trade_records),
-                'winning_trades': len(trades_df[trades_df['profit_pct'] > 0]) if not trades_df.empty else 0,
-                'losing_trades': len(trades_df[trades_df['profit_pct'] <= 0]) if not trades_df.empty else 0,
-                'win_rate': len(trades_df[trades_df['profit_pct'] > 0]) / len(trades_df) if not trades_df.empty else 0,
-                'avg_profit': trades_df['profit_pct'].mean() if not trades_df.empty else 0,
-                'avg_win': trades_df[trades_df['profit_pct'] > 0]['profit_pct'].mean() if not trades_df.empty and len(trades_df[trades_df['profit_pct'] > 0]) > 0 else 0,
-                'avg_loss': trades_df[trades_df['profit_pct'] <= 0]['profit_pct'].mean() if not trades_df.empty and len(trades_df[trades_df['profit_pct'] <= 0]) > 0 else 0,
-                'max_profit': trades_df['profit_pct'].max() if not trades_df.empty else 0,
-                'max_loss': trades_df['profit_pct'].min() if not trades_df.empty else 0,
-                'total_profit': trades_df['profit_pct'].sum() if not trades_df.empty else 0,
-                'avg_hold_periods': trades_df['hold_periods'].mean() if not trades_df.empty else 0,
-                'accuracy': accuracy_score(y, predictions),
-                'timestamp': datetime.now().isoformat(),
-                'trades': trade_records
-            }
-            
-            # Erweiterte Metriken berechnen
-            if not trades_df.empty:
-                # Profitfaktor: Summe der Gewinne / Summe der Verluste (absolut)
-                profits = trades_df[trades_df['profit_pct'] > 0]['profit_pct'].sum()
-                losses = abs(trades_df[trades_df['profit_pct'] < 0]['profit_pct'].sum())
-                backtest_results['profit_factor'] = profits / losses if losses > 0 else float('inf')
-                
-                # Sharpe Ratio (vereinfacht)
-                if len(trades_df) > 1:
-                    returns = trades_df['profit_pct']
-                    sharpe = returns.mean() / returns.std() if returns.std() > 0 else 0
-                    backtest_results['sharpe_ratio'] = sharpe * np.sqrt(252)  # Annualisiert
-                    
-                # Drawdown-Analyse
-                cumulative_returns = np.cumsum(trades_df['profit_pct'].values)
-                running_max = np.maximum.accumulate(cumulative_returns)
-                drawdowns = running_max - cumulative_returns
-                backtest_results['max_drawdown'] = drawdowns.max() if len(drawdowns) > 0 else 0
-                
-                # Trades nach Exit-Grund analysieren
-                exit_reasons = trades_df['exit_reason'].value_counts().to_dict()
-                backtest_results['exit_reasons'] = exit_reasons
-            
-            # Backtest-Ergebnis speichern
-            self._save_backtest_results(model_name, backtest_results)
-            
-            # Performance-Metriken aktualisieren
-            if model_name in self.performance_metrics:
-                self.performance_metrics[model_name]['backtest_results'] = backtest_results
-            
-            # Visualisierung erstellen
-            self._create_backtest_visualization(model_name, df, backtest_results)
-            
-            # Erfolgreicher Backtest
-            backtest_result['success'] = True
-            backtest_result['win_rate'] = backtest_results['win_rate']
-            backtest_result['total_profit'] = backtest_results['total_profit']
-            backtest_result['total_trades'] = backtest_results['total_trades']
-            
-            self.logger.info(f"Backtest für {model_name} abgeschlossen. "
-                           f"Win Rate: {backtest_results['win_rate']:.2%}, "
-                           f"Total Profit: {backtest_results['total_profit']:.2f}%")
-            
-            # Benachrichtigung senden, falls Telegram verfügbar
-            if self.telegram_interface:
-                self.telegram_interface.send_notification(
-                    title="Backtest abgeschlossen",
-                    message=(
-                        f"Backtest für Modell {model_name} ({symbol}, {timeframe}) abgeschlossen.\n"
-                        f"Win Rate: {backtest_results['win_rate']:.2%}\n"
-                        f"Trades: {backtest_results['total_trades']}\n"
-                        f"Gesamtgewinn: {backtest_results['total_profit']:.2f}%"
-                    ),
-                    priority="normal"
-                )
-            
-        except Exception as e:
-            self.logger.error(f"Fehler im Backtest Thread für {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            backtest_result['error'] = str(e)
-            
-            # Benachrichtigung über Fehler senden
-            if self.telegram_interface:
-                self.telegram_interface.send_notification(
-                    title="Fehler beim Backtest",
-                    message=f"Backtest für Modell {model_name} ({symbol}, {timeframe}) fehlgeschlagen: {str(e)}",
-                    priority="high"
-                )
-            
-        finally:
-            self.is_backtesting = False
-            self._notify_backtest_complete_callbacks(backtest_result)
-
-    def _save_backtest_results(self, model_name: str, results: Dict[str, Any]):
-        """
-        Speichert die Backtest-Ergebnisse.
-
-        Args:
-            model_name: Name des Modells
-            results: Backtest-Ergebnisse
-        """
-        try:
-            # Ergebnisse als JSON speichern
-            results_path = self.results_path / f"{model_name}_backtest.json"
-            with open(results_path, 'w') as f:
-                json.dump(results, f, indent=2, default=str)  # default=str für Datetime-Objekte
-            self.logger.info(f"Backtest-Ergebnisse für {model_name} gespeichert unter {results_path}")
-        except Exception as e:
-            self.logger.error(f"Fehler beim Speichern der Backtest-Ergebnisse für {model_name}: {str(e)}")
-
-    def _create_backtest_visualization(self, model_name: str, df: pd.DataFrame, results: Dict[str, Any]):
-        """
-        Erstellt eine Visualisierung der Backtest-Ergebnisse.
-
-        Args:
-            model_name: Name des Modells
-            df: DataFrame mit Handelsdaten und Ergebnissen
-            results: Backtest-Ergebnisse
-        """
-        try:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
-            
-            # Preischart mit Einstiegs- und Ausstiegspunkten
-            ax1.plot(df.index, df['close'], label='Close Price', color='blue', alpha=0.7)
-            
-            # Einstiegspunkte markieren
-            entries = df[df['entry_price'].notnull()]
-            ax1.scatter(entries.index, entries['entry_price'], marker='^', color='green', s=100, label='Entry')
-            
-            # Ausstiegspunkte markieren
-            exits = df[df['exit_price'].notnull()]
-            ax1.scatter(exits.index, exits['exit_price'], marker='v', color='red', s=100, label='Exit')
-            
-            # Stop-Loss-Linien hinzufügen
-            stops = df[df['stop_loss'].notnull()]
-            if not stops.empty:
-                ax1.plot(stops.index, stops['stop_loss'], color='red', linestyle='--', label='Stop-Loss')
-            
-            # Take-Profit-Linien hinzufügen
-            take_profits = df[df['take_profit'].notnull()]
-            if not take_profits.empty:
-                ax1.plot(take_profits.index, take_profits['take_profit'], color='green', linestyle='--', label='Take-Profit')
-            
-            ax1.set_title(f'Backtest Results for {model_name} ({results["symbol"]}, {results["timeframe"]})')
-            ax1.set_ylabel('Price')
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-            
-            # Gewinn/Verlust pro Trade
-            trade_profits = [trade['profit_pct'] for trade in results['trades']]
-            trade_times = [trade['exit_time'] for trade in results['trades']]
-            colors = ['green' if profit > 0 else 'red' for profit in trade_profits]
-            
-            ax2.bar(range(len(trade_profits)), trade_profits, color=colors)
-            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-            ax2.set_xlabel('Trade Number')
-            ax2.set_ylabel('Profit/Loss (%)')
-            ax2.set_title(f'Trade Performance (Win Rate: {results["win_rate"]:.2%}, Total Profit: {results["total_profit"]:.2f}%)')
-            ax2.grid(True, alpha=0.3)
-            
-            # Textbox mit Statistiken
-            stats_text = (
-                f"Total Trades: {results['total_trades']}\n"
-                f"Winning Trades: {results['winning_trades']}\n"
-                f"Losing Trades: {results['losing_trades']}\n"
-                f"Win Rate: {results['win_rate']:.2%}\n"
-                f"Average Profit: {results['avg_profit']:.2f}%\n"
-                f"Average Win: {results['avg_win']:.2f}%\n"
-                f"Average Loss: {results['avg_loss']:.2f}%\n"
-                f"Maximum Profit: {results['max_profit']:.2f}%\n"
-                f"Maximum Loss: {results['max_loss']:.2f}%"
-            )
-            
-            # Textbox platzieren
-            props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-            ax1.text(0.02, 0.02, stats_text, transform=ax1.transAxes, fontsize=9,
-                    verticalalignment='bottom', bbox=props)
-            
-            plt.tight_layout()
-            
-            # Speichern der Visualisierung
-            fig_path = self.charts_path / f"{model_name}_backtest_visualization.png"
-            plt.savefig(fig_path)
-            plt.close(fig)
-            
-            self.logger.info(f"Backtest-Visualisierung für {model_name} gespeichert unter {fig_path}")
-        except Exception as e:
-            self.logger.error(f"Fehler beim Erstellen der Backtest-Visualisierung für {model_name}: {str(e)}")
-
-    def get_market_signal(self, symbol: str, tim
-def get_market_signal(self, symbol: str, timeframe: str = '1h') -> Dict[str, Any]:
-        """
-        Generiert ein Handelssignal für ein Symbol basierend auf allen trainierten Modellen.
-
-        Args:
-            symbol: Handelssymbol
-            timeframe: Zeitrahmen
-
-        Returns:
-            Handelssignal als Dictionary
-        """
-        try:
-            if not self.data_pipeline:
-                return {
-                    'success': False,
-                    'error': "Keine Datenpipeline verfügbar"
-                }
-            
-            # Aktuelle Marktdaten abrufen
-            df = self.data_pipeline.get_crypto_data(symbol, timeframe, limit=50)
-            if df is None or df.empty:
-                return {
-                    'success': False,
-                    'error': f"Keine Daten für {symbol} ({timeframe}) verfügbar"
-                }
-            
-            # Technische Indikatoren hinzufügen
-            indicators = [
-                {'type': 'rsi', 'period': 14},
-                {'type': 'ema', 'period': 9},
-                {'type': 'ema', 'period': 21},
-                {'type': 'macd', 'fast_period': 12, 'slow_period': 26, 'signal_period': 9},
-                {'type': 'bollinger', 'period': 20, 'std_dev': 2},
-                {'type': 'atr', 'period': 14}
-            ]
-            
-            df = self.data_pipeline.get_indicators(df, indicators)
-            
-            # Neueste Daten extrahieren
-            latest_data = df.iloc[-1].to_dict()
-            
-            # Alle passenden Modelle finden
-            matching_models = []
-            for model_name, metrics in self.performance_metrics.items():
-                if metrics.get('symbol') == symbol and metrics.get('timeframe') == timeframe:
-                    if 'backtest_results' in metrics and metrics['backtest_results'].get('win_rate', 0) >= 0.5:
-                        matching_models.append(model_name)
-            
-            if not matching_models:
-                return {
-                    'success': False,
-                    'error': f"Keine passenden Modelle für {symbol} ({timeframe}) gefunden"
-                }
-            
-            # Vorhersagen von allen Modellen sammeln
-            predictions = []
-            for model_name in matching_models:
-                prediction = self.predict(model_name, latest_data)
-                if prediction['success']:
-                    predictions.append({
-                        'model': model_name,
-                        'prediction': prediction['prediction'],
-                        'confidence': prediction.get('confidence', 0.5)
-                    })
-            
-            if not predictions:
-                return {
-                    'success': False,
-                    'error': "Keine erfolgreichen Vorhersagen"
-                }
-            
-            # Gesamtsignal basierend auf einem gewichteten Durchschnitt berechnen
-            total_confidence = 0
-            weighted_sum = 0
-            for pred in predictions:
-                confidence = pred.get('confidence', 0.5)
-                total_confidence += confidence
-                weighted_sum += pred['prediction'] * confidence
-            
-            if total_confidence > 0:
-                signal = weighted_sum / total_confidence
-            else:
-                signal = 0.5
-            
-            # Signal-Richtung bestimmen
-            direction = "buy" if signal > 0.6 else "sell" if signal < 0.4 else "neutral"
-            
-            # Aktuellen Preis und technische Indikatoren hinzufügen
-            current_price = latest_data['close']
-            rsi = latest_data.get('rsi_14', None)
-            
-            # Traditionelle Signale zur Bestätigung
-            traditional_signals = []
-            if rsi is not None:
-                if rsi < 30:
-                    traditional_signals.append("RSI oversold")
-                elif rsi > 70:
-                    traditional_signals.append("RSI overbought")
-            
-            if 'ema_9' in latest_data and 'ema_21' in latest_data:
-                ema_9 = latest_data['ema_9']
-                ema_21 = latest_data['ema_21']
-                if ema_9 > ema_21:
-                    traditional_signals.append("EMA9 above EMA21 (bullish)")
-                else:
-                    traditional_signals.append("EMA9 below EMA21 (bearish)")
-            
-            # Signalstärke basierend auf Übereinstimmung berechnen
-            if direction == "buy":
-                signal_strength = min(1.0, signal * 1.5)  # Skalieren auf max. 1.0
-            elif direction == "sell":
-                signal_strength = min(1.0, (1 - signal) * 1.5)  # Skalieren auf max. 1.0
-            else:
-                signal_strength = 0.5  # Neutral = 50% Stärke
-            
-            # Ergebnis zusammenstellen
-            result = {
-                'success': True,
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'current_price': current_price,
-                'direction': direction,
-                'signal_value': signal,
-                'signal_strength': signal_strength,
-                'rsi': rsi,
-                'traditional_signals': traditional_signals,
-                'model_predictions': predictions,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            # Signal im Cache speichern
-            self.current_signals[f"{symbol}_{timeframe}"] = result
-            
-            # Signal-Callbacks benachrichtigen
-            self.signals_generated += 1
-            self._notify_signal_callbacks(result)
+            result = result.dropna()
             
             return result
             
         except Exception as e:
-            self.logger.error(f"Fehler bei der Generierung des Handelssignals für {symbol}: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Fehler bei der Feature-Generierung: {str(e)}")
+            return None
+    
+    def train_model(self, symbol: str, timeframe: str, model_type: str = 'classification') -> bool:
+        """
+        Trainiert ein Modell für ein bestimmtes Symbol und einen Zeitrahmen.
+        
+        Args:
+            symbol: Handelssymbol (z.B. 'BTC/USDT')
+            timeframe: Zeitrahmen ('15m', '1h', '4h', '1d')
+            model_type: Art des Modells ('classification' oder 'regression')
+        
+        Returns:
+            True bei Erfolg, False bei Fehler
+        """
+        model_id = f"{symbol.replace('/', '_')}_{timeframe}_{model_type}"
+        self.logger.info(f"Starte Training für Modell {model_id}...")
+        
+        try:
+            # Markiere als in Training
+            self.is_training = True
+            self.current_training_task = model_id
+            
+            # Daten vorbereiten
+            df = self.preprocess_data(symbol, timeframe, days=self.backtest_days)
+            if df is None or df.empty:
+                self.logger.error(f"Keine ausreichenden Daten für das Training von {model_id}")
+                self.is_training = False
+                return False
+            
+            # Features und Ziele extrahieren
+            X, y = self._prepare_model_data(df, model_type)
+            if X is None or y is None:
+                self.logger.error(f"Fehler bei der Vorbereitung der Trainingsdaten für {model_id}")
+                self.is_training = False
+                return False
+            
+            # Daten aufteilen
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=self.validation_split, shuffle=False
+            )
+            
+            # Modell initialisieren und trainieren
+            model = self._create_model(model_type)
+            if model is None:
+                self.logger.error(f"Modell konnte nicht erstellt werden für {model_id}")
+                self.is_training = False
+                return False
+            
+            # Modell trainieren
+            model.fit(X_train, y_train)
+            
+            # Modell evaluieren
+            y_pred = model.predict(X_test)
+            metrics = self._evaluate_model(y_test, y_pred, model_type)
+            self.logger.info(f"Modell-Metriken für {model_id}: {metrics}")
+            
+            # Modell und Metadaten speichern
+            self._save_model(model, model_id, {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'model_type': model_type,
+                'metrics': metrics,
+                'features': list(X.columns),
+                'training_date': datetime.datetime.now().isoformat(),
+                'training_samples': len(X_train)
+            })
+            
+            # Performance-Metriken aktualisieren
+            self.performance_metrics['trained_models'] += 1
+            self.performance_metrics['last_training_time'] = datetime.datetime.now().isoformat()
+            if 'accuracy' in metrics:
+                if 'global_accuracy' not in self.performance_metrics or self.performance_metrics['global_accuracy'] is None:
+                    self.performance_metrics['global_accuracy'] = metrics['accuracy']
+                else:
+                    # Gleitender Durchschnitt für die globale Genauigkeit
+                    self.performance_metrics['global_accuracy'] = (
+                        self.performance_metrics['global_accuracy'] * 0.7 + metrics['accuracy'] * 0.3
+                    )
+            
+            self.is_training = False
+            self.current_training_task = None
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Training von {model_id}: {str(e)}")
+            self.is_training = False
+            self.current_training_task = None
+            return False
+    
+    def _prepare_model_data(self, df: pd.DataFrame, model_type: str) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Bereitet Daten für das Modelltraining vor.
+        
+        Args:
+            df: DataFrame mit Features
+            model_type: Art des Modells ('classification' oder 'regression')
+        
+        Returns:
+            Tuple aus Feature-DataFrame (X) und Ziel-Serie (y)
+        """
+        try:
+            # Zielspaltennamen basierend auf Modelltyp
+            if model_type == 'classification':
+                target_column = 'future_direction_6'  # 6 Perioden Vorhersage (Richtung)
+            else:
+                target_column = 'future_pct_6'  # 6 Perioden Vorhersage (Prozentuale Änderung)
+            
+            if target_column not in df.columns:
+                self.logger.error(f"Zielspalte {target_column} nicht in Daten gefunden")
+                return None, None
+            
+            # Feature-Spalten auswählen (alle außer zukünftige Werte und einige andere)
+            exclude_patterns = ['future_', 'timestamp', 'date']
+            feature_columns = [col for col in df.columns if not any(pattern in col for pattern in exclude_patterns)]
+            
+            X = df[feature_columns].copy()
+            y = df[target_column].copy()
+            
+            return X, y
+            
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Datenvorbereitung: {str(e)}")
+            return None, None
+    
+    def _create_model(self, model_type: str):
+        """
+        Erstellt ein neues Modell basierend auf dem Modelltyp.
+        
+        Args:
+            model_type: Art des Modells ('classification' oder 'regression')
+        
+        Returns:
+            Ein Modell-Objekt
+        """
+        try:
+            if model_type == 'classification':
+                # Klassifikationsmodell (Richtungsvorhersage)
+                return RandomForestClassifier(
+                    n_estimators=100,
+                    max_depth=10,
+                    random_state=42,
+                    n_jobs=-1
+                )
+            else:
+                # Regressionsmodell (Preisänderungsvorhersage)
+                return GradientBoostingRegressor(
+                    n_estimators=100,
+                    max_depth=5,
+                    learning_rate=0.1,
+                    random_state=42
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Modellerstellung: {str(e)}")
+            return None
+    
+    def _evaluate_model(self, y_true, y_pred, model_type: str) -> Dict[str, float]:
+        """
+        Evaluiert ein Modell und berechnet Leistungsmetriken.
+        
+        Args:
+            y_true: Wahre Werte
+            y_pred: Vorhergesagte Werte
+            model_type: Art des Modells ('classification' oder 'regression')
+        
+        Returns:
+            Dictionary mit Leistungsmetriken
+        """
+        try:
+            if model_type == 'classification':
+                return {
+                    'accuracy': accuracy_score(y_true, y_pred),
+                    'precision': precision_score(y_true, y_pred, zero_division=0),
+                    'recall': recall_score(y_true, y_pred, zero_division=0)
+                }
+            else:
+                return {
+                    'mse': mean_squared_error(y_true, y_pred),
+                    'mae': mean_absolute_error(y_true, y_pred),
+                    'rmse': np.sqrt(mean_squared_error(y_true, y_pred))
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Modellevaluierung: {str(e)}")
+            return {'error': str(e)}
+    
+    def _save_model(self, model, model_id: str, metadata: Dict[str, Any]) -> bool:
+        """
+        Speichert ein trainiertes Modell und seine Metadaten.
+        
+        Args:
+            model: Das trainierte Modell
+            model_id: Eindeutige ID für das Modell
+            metadata: Metadaten für das Modell
+        
+        Returns:
+            True bei Erfolg, False bei Fehler
+        """
+        try:
+            # Thread-sicher speichern
+            with self.model_lock:
+                # Speicherpfade
+                model_dir = self.models_path
+                model_path = model_dir / f"{model_id}.pkl"
+                metadata_path = model_dir / f"{model_id}_metadata.json"
+                
+                # Modell speichern
+                with open(model_path, 'wb') as f:
+                    pickle.dump(model, f)
+                
+                # Metadaten speichern
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                
+                # Im Speicher halten
+                self.models[model_id] = {
+                    'model': model,
+                    'metadata': metadata
+                }
+                
+                self.logger.info(f"Modell {model_id} erfolgreich gespeichert")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Fehler beim Speichern des Modells {model_id}: {str(e)}")
+            return False
+    
+    def load_model(self, model_id: str) -> Dict[str, Any]:
+        """
+        Lädt ein Modell aus der Datei.
+        
+        Args:
+            model_id: Eindeutige ID für das Modell
+        
+        Returns:
+            Dictionary mit Modell und Metadaten oder None bei Fehler
+        """
+        try:
+            # Wenn Modell bereits geladen ist, gib es zurück
+            if model_id in self.models:
+                return self.models[model_id]
+            
+            # Thread-sicher laden
+            with self.model_lock:
+                # Dateipfade
+                model_dir = self.models_path
+                model_path = model_dir / f"{model_id}.pkl"
+                metadata_path = model_dir / f"{model_id}_metadata.json"
+                
+                # Prüfen, ob Dateien existieren
+                if not model_path.exists() or not metadata_path.exists():
+                    self.logger.warning(f"Modell {model_id} nicht gefunden")
+                    return None
+                
+                # Modell laden
+                with open(model_path, 'rb') as f:
+                    model = pickle.load(f)
+                
+                # Metadaten laden
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                
+                # Im Speicher halten
+                self.models[model_id] = {
+                    'model': model,
+                    'metadata': metadata
+                }
+                
+                self.logger.info(f"Modell {model_id} erfolgreich geladen")
+                return self.models[model_id]
+                
+        except Exception as e:
+            self.logger.error(f"Fehler beim Laden des Modells {model_id}: {str(e)}")
+            return None
+    
+    def get_available_models(self) -> List[Dict[str, Any]]:
+        """
+        Gibt eine Liste aller verfügbaren Modelle und ihrer Metadaten zurück.
+        
+        Returns:
+            Liste von Modellmetadaten
+        """
+        try:
+            models_info = []
+            
+            # Durchsuche Modellverzeichnis nach Metadaten-Dateien
+            metadata_files = list(self.models_path.glob("*_metadata.json"))
+            
+            for metadata_path in metadata_files:
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+                    
+                    # Modell-ID aus Dateinamen extrahieren
+                    model_id = metadata_path.stem.replace('_metadata', '')
+                    
+                    # Information mit Metadaten und Verfügbarkeitsstatus
+                    model_info = {
+                        'model_id': model_id,
+                        'loaded': model_id in self.models,
+                        'metadata': metadata,
+                        'file_path': str(metadata_path)
+                    }
+                    
+                    models_info.append(model_info)
+                except Exception as e:
+                    self.logger.warning(f"Fehler beim Laden der Metadaten für {metadata_path}: {str(e)}")
+            
+            return models_info
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Auflisten verfügbarer Modelle: {str(e)}")
+            return []
+    
+    def predict(self, symbol: str, timeframe: str, model_type: str = 'classification') -> Dict[str, Any]:
+        """
+        Führt eine Vorhersage für ein bestimmtes Symbol und einen Zeitrahmen durch.
+        
+        Args:
+            symbol: Handelssymbol (z.B. 'BTC/USDT')
+            timeframe: Zeitrahmen ('15m', '1h', '4h', '1d')
+            model_type: Art des Modells ('classification' oder 'regression')
+        
+        Returns:
+            Dictionary mit Vorhersagewerten und Konfidenz
+        """
+        try:
+            # Modell-ID generieren
+            model_id = f"{symbol.replace('/', '_')}_{timeframe}_{model_type}"
+            
+            # Modell laden
+            model_data = self.load_model(model_id)
+            if not model_data:
+                self.logger.warning(f"Kein Modell für {model_id} gefunden, versuche ein neues zu trainieren")
+                success = self.train_model(symbol, timeframe, model_type)
+                if not success:
+                    self.logger.error(f"Konnte kein Modell für {model_id} trainieren")
+                    return {'error': 'Modell nicht verfügbar und konnte nicht trainiert werden'}
+                model_data = self.load_model(model_id)
+            
+            # Aktuelle Marktdaten abrufen
+            current_data = self.preprocess_data(symbol, timeframe, days=7)  # Letzte 7 Tage
+            if current_data is None or current_data.empty:
+                return {'error': 'Keine aktuellen Marktdaten verfügbar'}
+            
+            # Letzte Zeile für Prediction nehmen
+            latest_data = current_data.iloc[-1:]
+            
+            # Features extrahieren, die im Modell verwendet wurden
+            feature_names = model_data['metadata']['features']
+            if not all(feature in latest_data.columns for feature in feature_names):
+                missing = [f for f in feature_names if f not in latest_data.columns]
+                self.logger.error(f"Fehlende Features in aktuellen Daten: {missing}")
+                return {'error': 'Fehlende Features in aktuellen Daten'}
+            
+            X = latest_data[feature_names]
+            
+            # Vorhersage durchführen
+            model = model_data['model']
+            
+            if model_type == 'classification':
+                # Klassifikation (0 oder 1)
+                prediction = model.predict(X)[0]
+                # Wahrscheinlichkeiten
+                probabilities = model.predict_proba(X)[0]
+                confidence = probabilities[1] if prediction == 1 else probabilities[0]
+                
+                result = {
+                    'direction': 'up' if prediction == 1 else 'down',
+                    'confidence': float(confidence),
+                    'probability_up': float(probabilities[1]),
+                    'probability_down': float(probabilities[0]),
+                    'timestamp': datetime.datetime.now().isoformat()
+                }
+            else:
+                # Regression (prozentuale Preisänderung)
+                prediction = model.predict(X)[0]
+                
+                result = {
+                    'predicted_change_pct': float(prediction),
+                    'direction': 'up' if prediction > 0 else 'down',
+                    'timestamp': datetime.datetime.now().isoformat()
+                }
+            
+            # Zusätzliche Informationen
+            result['model_id'] = model_id
+            result['model_type'] = model_type
+            result['symbol'] = symbol
+            result['timeframe'] = timeframe
+            result['current_price'] = float(latest_data['close'].iloc[-1])
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Vorhersage für {symbol} ({timeframe}): {str(e)}")
+            return {'error': str(e)}
+    
+    def train_all_models(self) -> Dict[str, Any]:
+        """
+        Trainiert Modelle für alle konfigurierten Märkte und Zeitrahmen.
+        
+        Returns:
+            Dictionary mit Trainingsergebnissen
+        """
+        self.logger.info("Starte Training für alle Modelle...")
+        results = {
+            'successful': [],
+            'failed': [],
+            'start_time': datetime.datetime.now().isoformat()
+        }
+        
+        try:
+            # Für jede Markt-Konfiguration
+            for market in self.markets:
+                symbol = market['symbol']
+                timeframes = market.get('timeframes', ['1h', '4h'])
+                
+                for timeframe in timeframes:
+                    # Klassifikationsmodell trainieren
+                    model_id = f"{symbol.replace('/', '_')}_{timeframe}_classification"
+                    self.logger.info(f"Training für {model_id}...")
+                    
+                    success = self.train_model(symbol, timeframe, 'classification')
+                    if success:
+                        results['successful'].append(model_id)
+                    else:
+                        results['failed'].append(model_id)
+                    
+                    # Optional: Regressionsmodell trainieren
+                    if market.get('train_regression', False):
+                        model_id = f"{symbol.replace('/', '_')}_{timeframe}_regression"
+                        self.logger.info(f"Training für {model_id}...")
+                        
+                        success = self.train_model(symbol, timeframe, 'regression')
+                        if success:
+                            results['successful'].append(model_id)
+                        else:
+                            results['failed'].append(model_id)
+            
+            results['end_time'] = datetime.datetime.now().isoformat()
+            results['total_models'] = len(results['successful']) + len(results['failed'])
+            results['success_rate'] = len(results['successful']) / results['total_models'] if results['total_models'] > 0 else 0
+            
+            self.logger.info(f"Training abgeschlossen. Erfolgreiche Modelle: {len(results['successful'])}, Fehlgeschlagene: {len(results['failed'])}")
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Training aller Modelle: {str(e)}")
+            results['error'] = str(e)
+            results['end_time'] = datetime.datetime.now().isoformat()
+            return results
+    
+    def run_backtest(self, symbol: str, timeframe: str, days: int = None, strategy: str = 'ml_basic') -> Dict[str, Any]:
+        """
+        Führt einen Backtest für ein bestimmtes Symbol und einen Zeitrahmen durch.
+        
+        Args:
+            symbol: Handelssymbol (z.B. 'BTC/USDT')
+            timeframe: Zeitrahmen ('15m', '1h', '4h', '1d')
+            days: Anzahl der Tage für den Backtest (optional)
+            strategy: Strategie-Typ für den Backtest
+        
+        Returns:
+            Dictionary mit Backtest-Ergebnissen
+        """
+        self.logger.info(f"Starte Backtest für {symbol} ({timeframe}) mit Strategie '{strategy}'...")
+        
+        try:
+            # Daten für den Backtest abrufen
+            backtest_days = days or self.backtest_days
+            df = self.preprocess_data(symbol, timeframe, days=backtest_days)
+            
+            if df is None or df.empty:
+                self.logger.error(f"Keine Daten für Backtest von {symbol} ({timeframe})")
+                return {'error': 'Keine Daten verfügbar'}
+            
+            # Modell laden oder trainieren falls notwendig
+            model_id = f"{symbol.replace('/', '_')}_{timeframe}_classification"
+            model_data = self.load_model(model_id)
+            
+            if not model_data:
+                self.logger.warning(f"Kein Modell für {model_id} gefunden, trainiere neu...")
+                success = self.train_model(symbol, timeframe, 'classification')
+                if not success:
+                    self.logger.error(f"Konnte kein Modell für {model_id} trainieren")
+                    return {'error': 'Modell konnte nicht trainiert werden'}
+                model_data = self.load_model(model_id)
+            
+            # Features für das Modell extrahieren
+            feature_names = model_data['metadata']['features']
+            missing_features = [f for f in feature_names if f not in df.columns]
+            
+            if missing_features:
+                self.logger.error(f"Fehlende Features für Backtest: {missing_features}")
+                return {'error': f"Fehlende Features: {missing_features}"}
+            
+            # Modell und Daten für Backtest vorbereiten
+            model = model_data['model']
+            X = df[feature_names]
+            
+            # Vorhersagen für den gesamten Datensatz
+            if hasattr(model, 'predict_proba'):
+                probabilities = model.predict_proba(X)
+                df['predicted_proba'] = probabilities[:, 1]  # Wahrscheinlichkeit für Aufwärtsbewegung
+            
+            df['predicted_direction'] = model.predict(X)
+            
+            # Backtest-Strategie anwenden
+            if strategy == 'ml_basic':
+                results = self._backtest_ml_basic(df, symbol, timeframe)
+            elif strategy == 'ml_with_indicators':
+                results = self._backtest_ml_with_indicators(df, symbol, timeframe)
+            else:
+                self.logger.error(f"Unbekannte Backtest-Strategie: {strategy}")
+                return {'error': f"Unbekannte Strategie: {strategy}"}
+            
+            # Ergebnisse speichern
+            self._save_backtest_results(results, symbol, timeframe, strategy)
+            
+            # Aktualisiere Performance-Metriken
+            if 'backtest_results' not in self.performance_metrics:
+                self.performance_metrics['backtest_results'] = {}
+            
+            self.performance_metrics['backtest_results'][f"{symbol}_{timeframe}_{strategy}"] = {
+                'win_rate': results['win_rate'],
+                'total_return': results['total_return_pct'],
+                'trades': results['total_trades']
+            }
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Backtest für {symbol} ({timeframe}): {str(e)}")
+            return {'error': str(e)}
+    
+    def _backtest_ml_basic(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict[str, Any]:
+        """
+        Führt einen einfachen ML-basierten Backtest durch.
+        
+        Args:
+            df: DataFrame mit Marktdaten und Vorhersagen
+            symbol: Handelssymbol
+            timeframe: Zeitrahmen
+        
+        Returns:
+            Dictionary mit Backtest-Ergebnissen
+        """
+        try:
+            # Copy für Backtest
+            backtest_df = df.copy()
+            
+            # Parameter
+            entry_threshold = 0.65  # Min. Wahrscheinlichkeit für Einstieg
+            take_profit_pct = 0.03  # Take-Profit (3%)
+            stop_loss_pct = 0.015   # Stop-Loss (1.5%)
+            
+            # Handelslogik initialisieren
+            backtest_df['position'] = 0
+            backtest_df['entry_price'] = None
+            backtest_df['exit_price'] = None
+            backtest_df['trade_return'] = None
+            backtest_df['cum_return'] = 1.0
+            
+            # Trades verfolgen
+            trades = []
+            in_position = False
+            entry_price = 0
+            entry_index = None
+            position_type = None
+            
+            # Backtest durchführen
+            for i in range(1, len(backtest_df)):
+                current_price = backtest_df['close'].iloc[i]
+                previous_close = backtest_df['close'].iloc[i-1]
+                
+                # Wenn wir nicht in einer Position sind, prüfe auf Einstiegssignale
+                if not in_position:
+                    # Long-Signal
+                    if (backtest_df['predicted_proba'].iloc[i] > entry_threshold):
+                        in_position = True
+                        position_type = 'long'
+                        entry_price = current_price
+                        entry_index = backtest_df.index[i]
+                        backtest_df.at[backtest_df.index[i], 'position'] = 1
+                        backtest_df.at[backtest_df.index[i], 'entry_price'] = entry_price
+                    
+                    # Short-Signal
+                    elif (backtest_df['predicted_proba'].iloc[i] < (1 - entry_threshold)):
+                        in_position = True
+                        position_type = 'short'
+                        entry_price = current_price
+                        entry_index = backtest_df.index[i]
+                        backtest_df.at[backtest_df.index[i], 'position'] = -1
+                        backtest_df.at[backtest_df.index[i], 'entry_price'] = entry_price
+                
+                # Wenn wir in einer Position sind, prüfe auf Ausstiegssignale
+                elif in_position:
+                    pct_change = (current_price / entry_price - 1) * (1 if position_type == 'long' else -1)
+                    
+                    # Take-Profit oder Stop-Loss erreicht
+                    if (pct_change >= take_profit_pct) or (pct_change <= -stop_loss_pct):
+                        # Position schließen
+                        exit_price = current_price
+                        trade_return = pct_change
+                        
+                        backtest_df.at[backtest_df.index[i], 'position'] = 0
+                        backtest_df.at[backtest_df.index[i], 'exit_price'] = exit_price
+                        backtest_df.at[backtest_df.index[i], 'trade_return'] = trade_return
+                        
+                        # Trade zur Liste hinzufügen
+                        trade = {
+                            'entry_time': entry_index,
+                            'exit_time': backtest_df.index[i],
+                            'position_type': position_type,
+                            'entry_price': entry_price,
+                            'exit_price': exit_price,
+                            'return_pct': trade_return * 100,
+                            'exit_reason': 'take_profit' if pct_change >= take_profit_pct else 'stop_loss'
+                        }
+                        trades.append(trade)
+                        
+                        # Position zurücksetzen
+                        in_position = False
+                        entry_price = 0
+                        entry_index = None
+                        position_type = None
+            
+            # Offene Position am Ende des Backtests schließen
+            if in_position:
+                exit_price = backtest_df['close'].iloc[-1]
+                pct_change = (exit_price / entry_price - 1) * (1 if position_type == 'long' else -1)
+                trade_return = pct_change
+                
+                backtest_df.at[backtest_df.index[-1], 'position'] = 0
+                backtest_df.at[backtest_df.index[-1], 'exit_price'] = exit_price
+                backtest_df.at[backtest_df.index[-1], 'trade_return'] = trade_return
+                
+                # Trade zur Liste hinzufügen
+                trade = {
+                    'entry_time': entry_index,
+                    'exit_time': backtest_df.index[-1],
+                    'position_type': position_type,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'return_pct': trade_return * 100,
+                    'exit_reason': 'end_of_backtest'
+                }
+                trades.append(trade)
+            
+            # Kumulative Returns berechnen
+            trade_returns = [trade['return_pct'] / 100 for trade in trades]
+            cumulative_return = 1.0
+            for ret in trade_returns:
+                cumulative_return *= (1 + ret)
+            
+            # Gewinn-/Verlusthandel-Statistik
+            winning_trades = [t for t in trades if t['return_pct'] > 0]
+            losing_trades = [t for t in trades if t['return_pct'] <= 0]
+            
+            # Ergebnisse berechnen
+            results = {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'start_date': backtest_df.index[0].isoformat(),
+                'end_date': backtest_df.index[-1].isoformat(),
+                'initial_price': backtest_df['close'].iloc[0],
+                'final_price': backtest_df['close'].iloc[-1],
+                'market_return_pct': (backtest_df['close'].iloc[-1] / backtest_df['close'].iloc[0] - 1) * 100,
+                'strategy_return_pct': (cumulative_return - 1) * 100,
+                'total_return_pct': (cumulative_return - 1) * 100,
+                'total_trades': len(trades),
+                'winning_trades': len(winning_trades),
+                'losing_trades': len(losing_trades),
+                'win_rate': len(winning_trades) / len(trades) if trades else 0,
+                'avg_win_pct': np.mean([t['return_pct'] for t in winning_trades]) if winning_trades else 0,
+                'avg_loss_pct': np.mean([t['return_pct'] for t in losing_trades]) if losing_trades else 0,
+                'max_drawdown_pct': self._calculate_max_drawdown(trade_returns) * 100,
+                'sharpe_ratio': self._calculate_sharpe_ratio(trade_returns),
+                'trades': trades
+            }
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Fehler im ML-Basic Backtest: {str(e)}")
+            return {'error': str(e)}
+    
+    def _backtest_ml_with_indicators(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict[str, Any]:
+        """
+        Führt einen ML-basierten Backtest mit zusätzlichen technischen Indikatoren durch.
+        
+        Args:
+            df: DataFrame mit Marktdaten und Vorhersagen
+            symbol: Handelssymbol
+            timeframe: Zeitrahmen
+        
+        Returns:
+            Dictionary mit Backtest-Ergebnissen
+        """
+        try:
+            # Copy für Backtest
+            backtest_df = df.copy()
+            
+            # Parameter
+            entry_threshold = 0.60  # Min. Wahrscheinlichkeit für Einstieg
+            take_profit_pct = 0.04  # Take-Profit (4%)
+            stop_loss_pct = 0.02    # Stop-Loss (2%)
+            
+            # Handelslogik initialisieren
+            backtest_df['position'] = 0
+            backtest_df['entry_price'] = None
+            backtest_df['exit_price'] = None
+            backtest_df['trade_return'] = None
+            backtest_df['cum_return'] = 1.0
+            
+            # Trades verfolgen
+            trades = []
+            in_position = False
+            entry_price = 0
+            entry_index = None
+            position_type = None
+            
+            # Backtest durchführen
+            for i in range(1, len(backtest_df)):
+                current_price = backtest_df['close'].iloc[i]
+                previous_close = backtest_df['close'].iloc[i-1]
+                
+                # Zusätzliche Indikatoren prüfen
+                rsi_oversold = False
+                rsi_overbought = False
+                if 'rsi_14' in backtest_df.columns:
+                    rsi = backtest_df['rsi_14'].iloc[i]
+                    rsi_oversold = rsi < 30
+                    rsi_overbought = rsi > 70
+                
+                trend_up = False
+                trend_down = False
+                if 'ema_55' in backtest_df.columns and 'ema_21' in backtest_df.columns:
+                    ema_short = backtest_df['ema_21'].iloc[i]
+                    ema_long = backtest_df['ema_55'].iloc[i]
+                    trend_up = ema_short > ema_long
+                    trend_down = ema_short < ema_long
+                
+                # Wenn wir nicht in einer Position sind, prüfe auf Einstiegssignale
+                if not in_position:
+                    # Long-Signal
+                    if (backtest_df['predicted_proba'].iloc[i] > entry_threshold and
+                        (trend_up or rsi_oversold)):
+                        in_position = True
+                        position_type = 'long'
+                        entry_price = current_price
+                        entry_index = backtest_df.index[i]
+                        backtest_df.at[backtest_df.index[i], 'position'] = 1
+                        backtest_df.at[backtest_df.index[i], 'entry_price'] = entry_price
+                    
+                    # Short-Signal
+                    elif (backtest_df['predicted_proba'].iloc[i] < (1 - entry_threshold) and
+                          (trend_down or rsi_overbought)):
+                        in_position = True
+                        position_type = 'short'
+                        entry_price = current_price
+                        entry_index = backtest_df.index[i]
+                        backtest_df.at[backtest_df.index[i], 'position'] = -1
+                        backtest_df.at[backtest_df.index[i], 'entry_price'] = entry_price
+                
+                # Wenn wir in einer Position sind, prüfe auf Ausstiegssignale
+                elif in_position:
+                    pct_change = (current_price / entry_price - 1) * (1 if position_type == 'long' else -1)
+                    
+                    # Take-Profit oder Stop-Loss erreicht oder Trendumkehr
+                    exit_condition = (
+                        (pct_change >= take_profit_pct) or 
+                        (pct_change <= -stop_loss_pct) or
+                        (position_type == 'long' and backtest_df['predicted_proba'].iloc[i] < 0.4) or
+                        (position_type == 'short' and backtest_df['predicted_proba'].iloc[i] > 0.6)
+                    )
+                    
+                    if exit_condition:
+                        # Position schließen
+                        exit_price = current_price
+                        trade_return = pct_change
+                        
+                        backtest_df.at[backtest_df.index[i], 'position'] = 0
+                        backtest_df.at[backtest_df.index[i], 'exit_price'] = exit_price
+                        backtest_df.at[backtest_df.index[i], 'trade_return'] = trade_return
+                        
+                        # Exit-Grund bestimmen
+                        if pct_change >= take_profit_pct:
+                            exit_reason = 'take_profit'
+                        elif pct_change <= -stop_loss_pct:
+                            exit_reason = 'stop_loss'
+                        else:
+                            exit_reason = 'signal_reversal'
+                        
+                        # Trade zur Liste hinzufügen
+                        trade = {
+                            'entry_time': entry_index,
+                            'exit_time': backtest_df.index[i],
+                            'position_type': position_type,
+                            'entry_price': entry_price,
+                            'exit_price': exit_price,
+                            'return_pct': trade_return * 100,
+                            'exit_reason': exit_reason
+                        }
+                        trades.append(trade)
+                        
+                        # Position zurücksetzen
+                        in_position = False
+                        entry_price = 0
+                        entry_index = None
+                        position_type = None
+            
+            # Offene Position am Ende des Backtests schließen
+            if in_position:
+                exit_price = backtest_df['close'].iloc[-1]
+                pct_change = (exit_price / entry_price - 1) * (1 if position_type == 'long' else -1)
+                trade_return = pct_change
+                
+                backtest_df.at[backtest_df.index[-1], 'position'] = 0
+                backtest_df.at[backtest_df.index[-1], 'exit_price'] = exit_price
+                backtest_df.at[backtest_df.index[-1], 'trade_return'] = trade_return
+                
+                # Trade zur Liste hinzufügen
+                trade = {
+                    'entry_time': entry_index,
+                    'exit_time': backtest_df.index[-1],
+                    'position_type': position_type,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'return_pct': trade_return * 100,
+                    'exit_reason': 'end_of_backtest'
+                }
+                trades.append(trade)
+            
+            # Kumulative Returns berechnen
+            trade_returns = [trade['return_pct'] / 100 for trade in trades]
+            cumulative_return = 1.0
+            for ret in trade_returns:
+                cumulative_return *= (1 + ret)
+            
+            # Gewinn-/Verlusthandel-Statistik
+            winning_trades = [t for t in trades if t['return_pct'] > 0]
+            losing_trades = [t for t in trades if t['return_pct'] <= 0]
+            
+            # Ergebnisse berechnen
+            results = {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'start_date': backtest_df.index[0].isoformat(),
+                'end_date': backtest_df.index[-1].isoformat(),
+                'initial_price': backtest_df['close'].iloc[0],
+                'final_price': backtest_df['close'].iloc[-1],
+                'market_return_pct': (backtest_df['close'].iloc[-1] / backtest_df['close'].iloc[0] - 1) * 100,
+                'strategy_return_pct': (cumulative_return - 1) * 100,
+                'total_return_pct': (cumulative_return - 1) * 100,
+                'total_trades': len(trades),
+                'winning_trades': len(winning_trades),
+                'losing_trades': len(losing_trades),
+                'win_rate': len(winning_trades) / len(trades) if trades else 0,
+                'avg_win_pct': np.mean([t['return_pct'] for t in winning_trades]) if winning_trades else 0,
+                'avg_loss_pct': np.mean([t['return_pct'] for t in losing_trades]) if losing_trades else 0,
+                'max_drawdown_pct': self._calculate_max_drawdown(trade_returns) * 100,
+                'sharpe_ratio': self._calculate_sharpe_ratio(trade_returns),
+                'trades': trades
+            }
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Fehler im ML-with-Indicators Backtest: {str(e)}")
+            return {'error': str(e)}
+    
+    def _calculate_max_drawdown(self, returns) -> float:
+        """
+        Berechnet den maximalen Drawdown aus einer Liste von Returns.
+        
+        Args:
+            returns: Liste von prozentualen Returns
+        
+        Returns:
+            Max. Drawdown als Dezimalwert
+        """
+        if not returns:
+            return 0.0
+        
+        try:
+            # Kumulative Returns berechnen
+            cum_returns = np.cumprod(np.array([1 + ret for ret in returns]))
+            # Running maximum berechnen
+            running_max = np.maximum.accumulate(cum_returns)
+            # Drawdown berechnen
+            drawdown = (running_max - cum_returns) / running_max
+            # Maximalen Drawdown zurückgeben
+            return np.max(drawdown)
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Drawdown-Berechnung: {str(e)}")
+            return 0.0
+    
+    def _calculate_sharpe_ratio(self, returns, risk_free_rate=0.0, periods_per_year=252) -> float:
+        """
+        Berechnet das Sharpe-Verhältnis.
+        
+        Args:
+            returns: Liste von prozentualen Returns
+            risk_free_rate: Risikoloser Zinssatz (Default: 0)
+            periods_per_year: Anzahl der Perioden pro Jahr
+        
+        Returns:
+            Sharpe-Verhältnis
+        """
+        if not returns or len(returns) < 2:
+            return 0.0
+        
+        try:
+            # Annualisierte Returns berechnen
+            mean_return = np.mean(returns)
+            annual_return = (1 + mean_return) ** periods_per_year - 1
+            
+            # Annualisierte Standardabweichung
+            std_return = np.std(returns, ddof=1)
+            annual_std = std_return * np.sqrt(periods_per_year)
+            
+            # Sharpe-Verhältnis
+            if annual_std == 0:
+                return 0.0
+            sharpe = (annual_return - risk_free_rate) / annual_std
+            
+            return sharpe
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Sharpe-Ratio-Berechnung: {str(e)}")
+            return 0.0
+    
+    def _save_backtest_results(self, results: Dict[str, Any], symbol: str, timeframe: str, strategy: str) -> bool:
+        """
+        Speichert die Ergebnisse eines Backtests.
+        
+        Args:
+            results: Backtest-Ergebnisse
+            symbol: Handelssymbol
+            timeframe: Zeitrahmen
+            strategy: Strategie-Typ
+        
+        Returns:
+            True bei Erfolg, False bei Fehler
+        """
+        try:
+            # Dateipfad generieren
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{symbol.replace('/', '_')}_{timeframe}_{strategy}_{timestamp}.json"
+            file_path = self.backtest_results_path / filename
+            
+            # Ergebnisse speichern
+            with open(file_path, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            self.logger.info(f"Backtest-Ergebnisse gespeichert: {file_path}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Fehler beim Speichern der Backtest-Ergebnisse: {str(e)}")
+            return False
+    
+    def get_backtest_results(self, symbol: str = None, timeframe: str = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Gibt die Ergebnisse früherer Backtests zurück.
+        
+        Args:
+            symbol: Optional, filter nach Symbol
+            timeframe: Optional, filter nach Zeitrahmen
+            limit: Maximale Anzahl zurückzugebender Ergebnisse
+        
+        Returns:
+            Liste von Backtest-Ergebnissen
+        """
+        try:
+            results = []
+            
+            # Alle JSON-Dateien im Backtest-Verzeichnis
+            json_files = list(self.backtest_results_path.glob("*.json"))
+            
+            # Nach neuesten sortieren
+            json_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            
+            # Dateien durchlaufen
+            for file_path in json_files:
+                filename = file_path.name
+                
+                # Filter anwenden
+                if symbol and symbol.replace('/', '_') not in filename:
+                    continue
+                if timeframe and timeframe not in filename:
+                    continue
+                
+                # Ergebnisse laden
+                try:
+                    with open(file_path, 'r') as f:
+                        backtest_data = json.load(f)
+                    
+                    # Dateipfad hinzufügen
+                    backtest_data['file_path'] = str(file_path)
+                    
+                    results.append(backtest_data)
+                    
+                    # Limit prüfen
+                    if len(results) >= limit:
+                        break
+                        
+                except Exception as file_error:
+                    self.logger.warning(f"Fehler beim Laden der Backtest-Datei {file_path}: {str(file_error)}")
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Backtest-Ergebnisse: {str(e)}")
+            return []
+    
+    def get_market_signals(self) -> Dict[str, Any]:
+        """
+        Generiert Trading-Signale für alle konfigurierten Märkte.
+        
+        Returns:
+            Dictionary mit Handelsempfehlungen
+        """
+        try:
+            signals = {
+                'timestamp': datetime.datetime.now().isoformat(),
+                'signals': [],
+                'summary': {
+                    'bullish': 0,
+                    'bearish': 0,
+                    'neutral': 0
+                }
+            }
+            
+            for market in self.markets:
+                symbol = market['symbol']
+                timeframes = market.get('timeframes', ['1h', '4h'])
+                
+                for timeframe in timeframes:
+                    signal = self.get_market_signal(symbol, timeframe)
+                    signals['signals'].append(signal)
+                    
+                    # Zusammenfassung aktualisieren
+                    if 'signal' in signal:
+                        sig_type = signal['signal']
+                        if sig_type == 'buy':
+                            signals['summary']['bullish'] += 1
+                        elif sig_type == 'sell':
+                            signals['summary']['bearish'] += 1
+                        else:
+                            signals['summary']['neutral'] += 1
+            
+            return signals
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Generieren der Marktsignale: {str(e)}")
+            return {'error': str(e), 'timestamp': datetime.datetime.now().isoformat()}
+    
+    def get_market_signal(self, symbol: str, timeframe: str = '1h') -> Dict[str, Any]:
+        """
+        Generiert ein Handelssignal für ein bestimmtes Symbol und einen Zeitrahmen.
+        
+        Args:
+            symbol: Handelssymbol (z.B. 'BTC/USDT')
+            timeframe: Zeitrahmen ('15m', '1h', '4h', '1d')
+        
+        Returns:
+            Dictionary mit Handelssignal und ergänzenden Informationen
+        """
+        try:
+            # ML-Vorhersage abrufen
+            prediction = self.predict(symbol, timeframe, 'classification')
+            
+            if 'error' in prediction:
+                self.logger.warning(f"Fehler bei der ML-Vorhersage für {symbol} ({timeframe}): {prediction['error']}")
+                # Fallback zu traditioneller Analyse
+                return self._generate_traditional_signal(symbol, timeframe)
+            
+            # Aktuelle Marktdaten abrufen
+            current_data = self.preprocess_data(symbol, timeframe, days=7)  # Letzte 7 Tage
+            if current_data is None or current_data.empty:
+                self.logger.warning(f"Keine aktuellen Marktdaten für {symbol} ({timeframe})")
+                return {
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'signal': 'neutral',
+                    'confidence': 0,
+                    'timestamp': datetime.datetime.now().isoformat(),
+                    'message': 'Keine aktuellen Marktdaten verfügbar'
+                }
+            
+            # Technische Indikatoren erfassen
+            latest_data = current_data.iloc[-1]
+            current_price = float(latest_data['close'])
+            
+            # RSI für Überkauft/Überverkauft-Indikation
+            rsi = float(latest_data['rsi_14']) if 'rsi_14' in latest_data else None
+            
+            # MACD für Trendstärke
+            macd = float(latest_data['macd']) if 'macd' in latest_data else None
+            macd_signal = float(latest_data['macd_signal']) if 'macd_signal' in latest_data else None
+            macd_hist = float(latest_data['macd_hist']) if 'macd_hist' in latest_data else None
+            
+            # Bollinger-Bänder für Volatilität
+            bb_upper = float(latest_data['bb_upper_20_2']) if 'bb_upper_20_2' in latest_data else None
+            bb_lower = float(latest_data['bb_lower_20_2']) if 'bb_lower_20_2' in latest_data else None
+            bb_width = ((bb_upper - bb_lower) / current_price) if bb_upper and bb_lower else None
+            
+            # Kombiniertes Signal generieren
+            ml_direction = prediction['direction']
+            ml_confidence = prediction['confidence']
+            
+            # Signal-Logik
+            signal = 'neutral'
+            signal_strength = 0.0
+            reasons = []
+            
+            # ML-Vorhersage als Hauptsignal
+            if ml_direction == 'up' and ml_confidence > 0.6:
+                signal = 'buy'
+                signal_strength = ml_confidence
+                reasons.append(f"ML-Modell prognostiziert Aufwärtsbewegung (Konf.: {ml_confidence:.2f})")
+            elif ml_direction == 'down' and ml_confidence > 0.6:
+                signal = 'sell'
+                signal_strength = ml_confidence
+                reasons.append(f"ML-Modell prognostiziert Abwärtsbewegung (Konf.: {ml_confidence:.2f})")
+            else:
+                reasons.append(f"ML-Modell unentschieden (Richtung: {ml_direction}, Konf.: {ml_confidence:.2f})")
+            
+            # RSI zur Bestätigung
+            if rsi is not None:
+                if rsi < 30:
+                    reasons.append(f"RSI überverkauft ({rsi:.2f})")
+                    if signal == 'neutral':
+                        signal = 'buy'
+                        signal_strength = 0.6
+                    elif signal == 'buy':
+                        signal_strength = min(0.9, signal_strength + 0.1)
+                elif rsi > 70:
+                    reasons.append(f"RSI überkauft ({rsi:.2f})")
+                    if signal == 'neutral':
+                        signal = 'sell'
+                        signal_strength = 0.6
+                    elif signal == 'sell':
+                        signal_strength = min(0.9, signal_strength + 0.1)
+            
+            # MACD zur Bestätigung
+            if macd is not None and macd_signal is not None:
+                if macd > macd_signal:
+                    reasons.append("MACD über Signallinie (bullish)")
+                    if signal == 'buy':
+                        signal_strength = min(0.95, signal_strength + 0.05)
+                elif macd < macd_signal:
+                    reasons.append("MACD unter Signallinie (bearish)")
+                    if signal == 'sell':
+                        signal_strength = min(0.95, signal_strength + 0.05)
+            
+            # Trend-Analyse (EMA-Kreuzung)
+            ema_short = float(latest_data['ema_8']) if 'ema_8' in latest_data else None
+            ema_long = float(latest_data['ema_21']) if 'ema_21' in latest_data else None
+            
+            if ema_short is not None and ema_long is not None:
+                if ema_short > ema_long:
+                    reasons.append("Kurzfristiger EMA über langfristigem EMA (bullish)")
+                    if signal == 'buy':
+                        signal_strength = min(0.95, signal_strength + 0.05)
+                elif ema_short < ema_long:
+                    reasons.append("Kurzfristiger EMA unter langfristigem EMA (bearish)")
+                    if signal == 'sell':
+                        signal_strength = min(0.95, signal_strength + 0.05)
+            
+            # Signalstärke auf Konfidenz mappen
+            confidence = signal_strength
+            
+            # Signal-Nachricht generieren
+            if signal == 'buy':
+                message = f"Kaufsignal für {symbol} mit {confidence:.0%} Konfidenz"
+            elif signal == 'sell':
+                message = f"Verkaufssignal für {symbol} mit {confidence:.0%} Konfidenz"
+            else:
+                message = f"Neutrales Signal für {symbol}"
+            
+            # Vollständiges Signal-Objekt zusammenstellen
+            result = {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'signal': signal,
+                'confidence': confidence,
+                'current_price': current_price,
+                'ml_direction': ml_direction,
+                'ml_confidence': ml_confidence,
+                'timestamp': datetime.datetime.now().isoformat(),
+                'message': message,
+                'reasons': reasons,
+                'indicators': {
+                    'rsi': rsi,
+                    'macd': macd,
+                    'macd_signal': macd_signal,
+                    'macd_hist': macd_hist,
+                    'bb_width': bb_width
+                }
+            }
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Generieren des Marktsignals für {symbol} ({timeframe}): {str(e)}")
             return {
-                'success': False,
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'signal': 'error',
+                'timestamp': datetime.datetime.now().isoformat(),
                 'error': str(e)
             }
-
-    def analyze_symbol(self, symbol: str, timeframe: str = '1h') -> Dict[str, Any]:
+    
+    def _generate_traditional_signal(self, symbol: str, timeframe: str) -> Dict[str, Any]:
         """
-        Führt eine umfassende Analyse eines Symbols durch.
-
+        Generiert ein Handelssignal basierend auf traditioneller technischer Analyse.
+        
         Args:
             symbol: Handelssymbol
             timeframe: Zeitrahmen
-
+        
         Returns:
-            Analyseergebnis als Dictionary
+            Dictionary mit Handelssignal
         """
         try:
-            if not self.data_pipeline:
-                return {
-                    'success': False,
-                    'error': "Keine Datenpipeline verfügbar"
-                }
+            # Marktdaten abrufen
+            df = self.preprocess_data(symbol, timeframe, days=7)
             
-            # Aktuelle Marktdaten abrufen
-            df = self.data_pipeline.get_crypto_data(symbol, timeframe, limit=100)
             if df is None or df.empty:
                 return {
-                    'success': False,
-                    'error': f"Keine Daten für {symbol} ({timeframe}) verfügbar"
+                    'symbol': symbol,
+                    'timeframe': timeframe,
+                    'signal': 'neutral',
+                    'confidence': 0,
+                    'timestamp': datetime.datetime.now().isoformat(),
+                    'message': 'Keine Daten verfügbar für traditionelle Analyse'
                 }
             
-            # Technische Indikatoren hinzufügen
-            indicators = [
-                {'type': 'rsi', 'period': 14},
-                {'type': 'ema', 'period': 9},
-                {'type': 'ema', 'period': 21},
-                {'type': 'macd', 'fast_period': 12, 'slow_period': 26, 'signal_period': 9},
-                {'type': 'bollinger', 'period': 20, 'std_dev': 2},
-                {'type': 'atr', 'period': 14},
-                {'type': 'vwap', 'period': 14},
-                {'type': 'adx', 'period': 14},
-                {'type': 'obv'},
-                {'type': 'cci', 'period': 20}
-            ]
+            # Letzte Daten extrahieren
+            latest = df.iloc[-1]
             
-            df = self.data_pipeline.get_indicators(df, indicators)
+            # Signale prüfen
+            buy_signals = 0
+            sell_signals = 0
+            reasons = []
             
-            # Zukünftige Preisänderungen berechnen (für die Zielwerte)
-            df['next_close'] = df['close'].shift(-1)
-            df['price_change'] = df['next_close'] - df['close']
-            df['returns'] = df['price_change'] / df['close']
-            df['direction'] = (df['returns'] > 0).astype(int)
+            # 1. RSI-Signal
+            if 'rsi_14' in latest:
+                rsi = latest['rsi_14']
+                if rsi < 30:
+                    buy_signals += 2
+                    reasons.append(f"RSI überverkauft ({rsi:.2f})")
+                elif rsi > 70:
+                    sell_signals += 2
+                    reasons.append(f"RSI überkauft ({rsi:.2f})")
             
-            # Aktuellen Preisstand und Änderung berechnen
-            current_price = df['close'].iloc[-1]
-            price_change_1d = (current_price / df['close'].iloc[-2] - 1) * 100 if len(df) > 1 else 0
-            price_change_7d = (current_price / df['close'].iloc[-7] - 1) * 100 if len(df) > 6 else 0
+            # 2. MACD-Signal
+            if 'macd' in latest and 'macd_signal' in latest:
+                macd = latest['macd']
+                macd_signal = latest['macd_signal']
+                if macd > macd_signal:
+                    buy_signals += 1
+                    reasons.append("MACD über Signallinie (bullish)")
+                elif macd < macd_signal:
+                    sell_signals += 1
+                    reasons.append("MACD unter Signallinie (bearish)")
             
-            # Technische Analysen
-            rsi = df['rsi_14'].iloc[-1]
-            ema_9 = df['ema_9'].iloc[-1]
-            ema_21 = df['ema_21'].iloc[-1]
-            ema_cross = "bullish" if ema_9 > ema_21 else "bearish"
+            # 3. Bollinger Bands
+            if 'bb_upper_20_2' in latest and 'bb_lower_20_2' in latest:
+                close = latest['close']
+                bb_upper = latest['bb_upper_20_2']
+                bb_lower = latest['bb_lower_20_2']
+                
+                if close >= bb_upper:
+                    sell_signals += 1
+                    reasons.append("Preis am oberen Bollinger-Band (mögliche Überkauft-Situation)")
+                elif close <= bb_lower:
+                    buy_signals += 1
+                    reasons.append("Preis am unteren Bollinger-Band (mögliche Überverkauft-Situation)")
             
-            macd = df['macd'].iloc[-1]
-            macd_signal = df['macd_signal'].iloc[-1]
-            macd_hist = df['macd_hist'].iloc[-1]
-            macd_cross = "bullish" if macd > macd_signal else "bearish"
+            # 4. Trend basierend auf EMAs
+            if 'ema_8' in latest and 'ema_21' in latest:
+                ema_short = latest['ema_8']
+                ema_long = latest['ema_21']
+                
+                if ema_short > ema_long:
+                    buy_signals += 1
+                    reasons.append("Kurzfristiger EMA über langfristigem EMA (bullish)")
+                elif ema_short < ema_long:
+                    sell_signals += 1
+                    reasons.append("Kurzfristiger EMA unter langfristigem EMA (bearish)")
             
-            bband_upper = df['bband_upper_20'].iloc[-1]
-            bband_lower = df['bband_lower_20'].iloc[-1]
-            bband_position = (current_price - bband_lower) / (bband_upper - bband_lower) if bband_upper != bband_lower else 0.5
+            # Signal berechnen
+            signal = 'neutral'
+            if buy_signals > sell_signals + 1:
+                signal = 'buy'
+            elif sell_signals > buy_signals + 1:
+                signal = 'sell'
             
-            atr = df['atr_14'].iloc[-1]
-            volatility = df['close'].pct_change().rolling(window=14).std().iloc[-1] * 100
+            # Konfidenz berechnen
+            total_signals = buy_signals + sell_signals
+            signal_diff = abs(buy_signals - sell_signals)
+            confidence = min(0.9, signal_diff / max(4, total_signals) if total_signals > 0 else 0)
             
-            # Signalgenerator aufrufen
-            trading_signal = self.get_market_signal(symbol, timeframe)
-            
-            # Traditionelle Signale zur Bestätigung
-            signals = []
-            if rsi < 30:
-                signals.append({"indicator": "RSI", "signal": "buy", "strength": 0.7, "description": "Oversold"})
-            elif rsi > 70:
-                signals.append({"indicator": "RSI", "signal": "sell", "strength": 0.7, "description": "Overbought"})
-            
-            if ema_9 > ema_21:
-                signals.append({"indicator": "EMA Cross", "signal": "buy", "strength": 0.6, "description": "Short-term EMA above long-term EMA"})
+            # Nachricht generieren
+            if signal == 'buy':
+                message = f"Kaufsignal für {symbol} basierend auf technischer Analyse"
+            elif signal == 'sell':
+                message = f"Verkaufssignal für {symbol} basierend auf technischer Analyse"
             else:
-                signals.append({"indicator": "EMA Cross", "signal": "sell", "strength": 0.6, "description": "Short-term EMA below long-term EMA"})
+                message = f"Neutrales Signal für {symbol}"
             
-            if macd > macd_signal:
-                signals.append({"indicator": "MACD", "signal": "buy", "strength": 0.65, "description": "MACD above signal line"})
-            else:
-                signals.append({"indicator": "MACD", "signal": "sell", "strength": 0.65, "description": "MACD below signal line"})
-            
-            if current_price < bband_lower:
-                signals.append({"indicator": "Bollinger Bands", "signal": "buy", "strength": 0.7, "description": "Price below lower band"})
-            elif current_price > bband_upper:
-                signals.append({"indicator": "Bollinger Bands", "signal": "sell", "strength": 0.7, "description": "Price above upper band"})
-            
-            # Support- und Widerstandsniveaus bestimmen
-            price_history = df['close'].tolist()
-            support_levels = self._find_support_levels(price_history, current_price)
-            resistance_levels = self._find_resistance_levels(price_history, current_price)
-            
-            # Trendanalyse
-            trend_30d = self._analyze_trend(df, days=30)
-            trend_7d = self._analyze_trend(df, days=7)
-            
-            # Gesamtanalyse erstellen
-            analysis = {
-                'success': True,
+            return {
                 'symbol': symbol,
                 'timeframe': timeframe,
-                'current_price': current_price,
-                'price_change_1d': price_change_1d,
-                'price_change_7d': price_change_7d,
-                'technical_indicators': {
-                    'rsi': rsi,
-                    'ema_cross': ema_cross,
-                    'macd_cross': macd_cross,
-                    'bollinger_band_position': bband_position,
-                    'atr': atr,
-                    'volatility': volatility
-                },
-                'signals': signals,
-                'trend': {
-                    'long_term': trend_30d,
-                    'short_term': trend_7d
-                },
-                'support_levels': support_levels,
-                'resistance_levels': resistance_levels,
-                'model_signal': trading_signal if trading_signal.get('success', False) else None,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            return analysis
-            
-        except Exception as e:
-            self.logger.error(f"Fehler bei der Analyse von {symbol}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return {
-                'success': False,
-                'error': str(e)
-            }
-
-    def _find_support_levels(self, prices: List[float], current_price: float, max_levels: int = 3) -> List[float]:
-        """
-        Findet Support-Levels unterhalb des aktuellen Preises.
-
-        Args:
-            prices: Liste von historischen Preisen
-            current_price: Aktueller Preis
-            max_levels: Maximale Anzahl an zurückzugebenden Levels
-
-        Returns:
-            Liste von Support-Levels
-        """
-        support_levels = []
-        price_array = np.array(prices)
-        
-        # Lokale Minima finden
-        for i in range(2, len(price_array) - 2):
-            if (price_array[i-2] > price_array[i-1] > price_array[i] < price_array[i+1] < price_array[i+2] and
-                price_array[i] < current_price):
-                support_levels.append(price_array[i])
-        
-        # Duplikate entfernen und sortieren
-        support_levels = sorted(set(support_levels), reverse=True)
-        
-        # Auf max_levels begrenzen
-        return support_levels[:max_levels]
-
-    def _find_resistance_levels(self, prices: List[float], current_price: float, max_levels: int = 3) -> List[float]:
-        """
-        Findet Widerstands-Levels oberhalb des aktuellen Preises.
-
-        Args:
-            prices: Liste von historischen Preisen
-            current_price: Aktueller Preis
-            max_levels: Maximale Anzahl an zurückzugebenden Levels
-
-        Returns:
-            Liste von Widerstands-Levels
-        """
-        resistance_levels = []
-        price_array = np.array(prices)
-        
-        # Lokale Maxima finden
-        for i in range(2, len(price_array) - 2):
-            if (price_array[i-2] < price_array[i-1] < price_array[i] > price_array[i+1] > price_array[i+2] and
-                price_array[i] > current_price):
-                resistance_levels.append(price_array[i])
-        
-        # Duplikate entfernen und sortieren
-        resistance_levels = sorted(set(resistance_levels))
-        
-        # Auf max_levels begrenzen
-        return resistance_levels[:max_levels]
-
-    def _analyze_trend(self, df: pd.DataFrame, days: int = 30) -> Dict[str, Any]:
-        """
-        Analysiert den Trend der letzten X Tage.
-
-        Args:
-            df: DataFrame mit Preisdaten
-            days: Anzahl der Tage für die Trendanalyse
-
-        Returns:
-            Trendanalyse als Dictionary
-        """
-        if len(df) < days:
-            days = len(df)
-        
-        # Daten für die Trendanalyse extrahieren
-        trend_data = df.iloc[-days:]
-        
-        # Lineare Regression für Trendlinie
-        x = np.arange(len(trend_data))
-        y = trend_data['close'].values
-        slope, intercept = np.polyfit(x, y, 1)
-        
-        # Bestimme Trend-Richtung und -Stärke
-        if slope > 0:
-            direction = "bullish"
-            strength = min(1.0, slope * 100 / y.mean())  # Normalisieren
-        else:
-            direction = "bearish"
-            strength = min(1.0, abs(slope) * 100 / y.mean())  # Normalisieren
-        
-        # Volatilität und Konsistenz des Trends
-        price_changes = trend_data['close'].pct_change().dropna()
-        volatility = price_changes.std() * 100
-        
-        # Zähle wie oft die Preise die Trendlinie kreuzen (weniger = konsistenter Trend)
-        trend_line = intercept + slope * x
-        crosses = sum(1 for i in range(1, len(y)) if (y[i-1] - trend_line[i-1]) * (y[i] - trend_line[i]) < 0)
-        consistency = 1 - (crosses / len(y))
-        
-        # Qualitative Bewertung
-        if strength < 0.2:
-            description = "Very weak"
-        elif strength < 0.4:
-            description = "Weak"
-        elif strength < 0.6:
-            description = "Moderate"
-        elif strength < 0.8:
-            description = "Strong"
-        else:
-            description = "Very strong"
-        
-        description = f"{description} {direction} trend"
-        
-        return {
-            'direction': direction,
-            'strength': strength,
-            'volatility': volatility,
-            'consistency': consistency,
-            'description': description,
-            'slope': slope,
-            'intercept': intercept
-        }
-
-    def get_active_models(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Gibt eine Liste der aktiven Modelle zurück, optional gefiltert nach Symbol.
-
-        Args:
-            symbol: Optionales Handelssymbol zur Filterung
-
-        Returns:
-            Liste von Modell-Informationen
-        """
-        active_models = []
-        
-        for model_name, metrics in self.performance_metrics.items():
-            model_symbol = metrics.get('symbol')
-            if symbol is None or model_symbol == symbol:
-                model_info = {
-                    'name': model_name,
-                    'symbol': model_symbol,
-                    'timeframe': metrics.get('timeframe'),
-                    'type': metrics.get('model_type'),
-                    'last_updated': metrics.get('last_updated'),
-                    'accuracy': metrics.get('train_metrics', {}).get('accuracy')
-                }
-                
-                # Backtest-Ergebnisse hinzufügen, falls vorhanden
-                if 'backtest_results' in metrics:
-                    backtest = metrics['backtest_results']
-                    model_info.update({
-                        'win_rate': backtest.get('win_rate'),
-                        'total_trades': backtest.get('total_trades'),
-                        'total_profit': backtest.get('total_profit')
-                    })
-                
-                active_models.append(model_info)
-        
-        return active_models
-
-    def get_backtest_results(self, model_name: str) -> Dict[str, Any]:
-        """
-        Gibt die Backtest-Ergebnisse für ein bestimmtes Modell zurück.
-
-        Args:
-            model_name: Name des Modells
-
-        Returns:
-            Backtest-Ergebnisse als Dictionary oder Fehlermeldung
-        """
-        try:
-            # Prüfen, ob Backtest-Ergebnisse im Speicher vorhanden sind
-            if model_name in self.performance_metrics and 'backtest_results' in self.performance_metrics[model_name]:
-                return {
-                    'success': True,
-                    'results': self.performance_metrics[model_name]['backtest_results']
-                }
-            
-            # Versuche, die Ergebnisse von der Festplatte zu laden
-            results_path = self.results_path / f"{model_name}_backtest.json"
-            if results_path.exists():
-                with open(results_path, 'r') as f:
-                    results = json.load(f)
-                return {
-                    'success': True,
-                    'results': results
-                }
-            
-            return {
-                'success': False,
-                'error': f"Keine Backtest-Ergebnisse für Modell {model_name} gefunden"
+                'signal': signal,
+                'confidence': confidence,
+                'timestamp': datetime.datetime.now().isoformat(),
+                'message': message,
+                'reasons': reasons,
+                'method': 'traditional',
+                'buy_signals': buy_signals,
+                'sell_signals': sell_signals
             }
             
         except Exception as e:
-            self.logger.error(f"Fehler beim Abrufen der Backtest-Ergebnisse für {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Fehler bei der traditionellen Signalgenerierung für {symbol}: {str(e)}")
             return {
-                'success': False,
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'signal': 'error',
+                'timestamp': datetime.datetime.now().isoformat(),
                 'error': str(e)
             }
-
-    def get_model_summary(self, model_name: str) -> Dict[str, Any]:
-        """
-        Erstellt eine Zusammenfassung für ein bestimmtes Modell.
-
-        Args:
-            model_name: Name des Modells
-
-        Returns:
-            Modell-Zusammenfassung als Dictionary
-        """
-        try:
-            if model_name not in self.performance_metrics:
-                return {
-                    'success': False,
-                    'error': f"Modell {model_name} nicht gefunden"
-                }
-            
-            metrics = self.performance_metrics[model_name]
-            
-            # Modell-Details sammeln
-            model_summary = {
-                'name': model_name,
-                'symbol': metrics.get('symbol'),
-                'timeframe': metrics.get('timeframe'),
-                'model_type': metrics.get('model_type'),
-                'training_date': metrics.get('last_updated'),
-                'features': metrics.get('features'),
-                'training_metrics': metrics.get('train_metrics', {})
-            }
-            
-            # Backtest-Ergebnisse, falls vorhanden
-            if 'backtest_results' in metrics:
-                backtest = metrics['backtest_results']
-                model_summary['backtest'] = {
-                    'win_rate': backtest.get('win_rate'),
-                    'total_trades': backtest.get('total_trades'),
-                    'total_profit': backtest.get('total_profit'),
-                    'avg_profit': backtest.get('avg_profit'),
-                    'avg_win': backtest.get('avg_win'),
-                    'avg_loss': backtest.get('avg_loss'),
-                    'max_profit': backtest.get('max_profit'),
-                    'max_loss': backtest.get('max_loss')
-                }
-            
-            # Feature-Importance, falls vorhanden
-            if 'train_metrics' in metrics and 'feature_importance' in metrics['train_metrics']:
-                # Feature-Namen und Importance-Werte kombinieren
-                features = metrics.get('features', [])
-                importance = metrics['train_metrics']['feature_importance']
-                if len(features) == len(importance):
-                    feature_importance = dict(zip(features, importance))
-                    # Nach Wichtigkeit sortieren
-                    feature_importance = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True))
-                    model_summary['feature_importance'] = feature_importance
-            
-            return {
-                'success': True,
-                'summary': model_summary
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Fehler beim Erstellen der Modell-Zusammenfassung für {model_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return {
-                'success': False,
-                'error': str(e)
-            }
-
+    
     def get_current_status(self) -> Dict[str, Any]:
         """
-        Gibt den aktuellen Status des Learning-Moduls zurück.
-
+        Gibt Statusinformationen zum Learning Module zurück.
+        
         Returns:
-            Status als Dictionary
+            Dictionary mit aktuellen Statusinformationen
         """
-        return {
-            'is_training': self.is_training,
-            'is_backtesting': self.is_backtesting,
-            'active_models': len(self.models),
-            'model_metrics': len(self.performance_metrics),
-            'active_signals': len(self.current_signals),
-            'training_count': self.training_count,
-            'successful_training_count': self.successful_training_count,
-            'backtest_count': self.backtest_count,
-            'signals_generated': self.signals_generated,
-            'last_model_update': self.last_model_update.isoformat(),
-            'auto_update_enabled': self.auto_update_enabled,
-            'last_updated': datetime.now().isoformat()
-        }
-
-
-# Beispiel für die Nutzung
-if __name__ == "__main__":
-    # Konfiguration
-    config = {
-        'backtest_days': 90,
-        'paper_trading_days': 14,
-        'target_win_rate': 0.6,
-        'training': {
-            'epochs': 100,
-            'batch_size': 32,
-            'validation_split': 0.2,
-            'patience': 10
-        }
-    }
-    
-    # Learning-Modul initialisieren
-    learning_module = LearningModule(config)
-    
-    # Hier würde man die Datenpipeline setzen
-    # learning_module.set_data_pipeline(data_pipeline)
-    
-    # Modell trainieren
-    # learning_module.train_model('btc_direction_1h', 'BTC/USDT', '1h', model_type='random_forest')
-    
-    # Handelssignal abrufen
-    # signal = learning_module.get_market_signal('BTC/USDT', '1h')
-    # print(f"Signal: {signal}")
+        try:
+            # Modelle zählen
+            model_files = list(self.models_path.glob("*.pkl"))
+            
+            # Überprüfe neuste Trainings- und Backtestdateien
+            backtest_files = list(self.backtest_results_path.glob("*.json"))
+            backtest_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            
+            # Neuster Backtest
+            latest_backtest = None
+            if backtest_files:
+                try:
+                    with open(backtest_files[0], 'r') as f:
+                        latest_backtest = json.load(f)
+                except:
+                    pass
+            
+            # Status konstruieren
+            status = {
+                'is_training': self.is_training,
+                'current_training_task': self.current_training_task,
+                'available_models': len(model_files),
+                'loaded_models': len(self.models),
+                'performance_metrics': self.performance_metrics,
+                'latest_backtest': latest_backtest,
+                'timestamp': datetime.datetime.now().isoformat()
+            }
+            
+            return status
+            
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen des aktuellen Status: {str(e)}")
+            return {
+                'error': str(e),
+                'timestamp': datetime.datetime.now().isoformat()
+            }
