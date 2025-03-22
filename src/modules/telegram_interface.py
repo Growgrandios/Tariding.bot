@@ -17,6 +17,19 @@ import numpy as np
 import pandas as pd
 import io
 from PIL import Image
+import os
+os.environ['PYTHONUNBUFFERED'] = '1'  # Deaktiviert Signalhandling im Thread
+
+# Ändern Sie den Bot-Start:
+def _run_bot(self):
+    try:
+        import asyncio
+        asyncio.set_event_loop(self.loop)
+        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        self.logger.error(f"Fehler im Bot-Thread: {str(e)}")
+        self.logger.error(traceback.format_exc())
+
 
 # Telegram-Bibliotheken
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
