@@ -20,16 +20,49 @@ from PIL import Image
 import os
 os.environ['PYTHONUNBUFFERED'] = '1'  # Deaktiviert Signalhandling im Thread
 
-# Ändern Sie den Bot-Start:
 def _run_bot(self):
+    """Führt den Telegram-Bot im Hintergrund aus."""
     try:
-        import asyncio
+        # Neuen Event-Loop erstellen
+        self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+        # Minimale Implementierung ohne Signalhandler
+        async def minimal_polling_loop():
+            # Initialisiere Application
+            await self.application.initialize()
+            
+            # Endlosschleife für Updates
+            offset = 0
+            while True:
+                try:
+                    # Manuelles Polling ohne Signal-Handler
+                    updates = await self.application.bot.get_updates(
+                        offset=offset,
+                        timeout=30,
+                        allowed_updates=Update.ALL_TYPES
+                    )
+                    
+                    # Updates verarbeiten
+                    for update in updates:
+                        offset = update.update_id + 1
+                        await self.application.process_update(update)
+                        
+                    # Kurze Pause
+                    await asyncio.sleep(0.1)
+                        
+                except Exception as e:
+                    self.logger.error(f"Fehler beim Abrufen von Updates: {str(e)}")
+                    await asyncio.sleep(1)
+        
+        # Starte den minimalen Polling-Loop
+        self.loop.run_until_complete(minimal_polling_loop())
     except Exception as e:
         self.logger.error(f"Fehler im Bot-Thread: {str(e)}")
         self.logger.error(traceback.format_exc())
-
+    finally:
+        self.logger.info("Bot-Thread beendet")
+        self.is_running = False
 
 # Telegram-Bibliotheken
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
