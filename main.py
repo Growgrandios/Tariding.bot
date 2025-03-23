@@ -2,119 +2,152 @@
 
 import os
 import sys
+import argparse
 import logging
-import traceback
 import json
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
+from dotenv import load_dotenv
 
-# Import des Telegram-Moduls
-from telegram_module import TelegramBot
+# Core-Module
+from src.core.config_manager import ConfigManager
+from src.core.main_controller import MainController
 
-# Konfiguration des Loggings
-def setup_logging(level=logging.INFO):
-    """Richtet das Logging-System ein"""
-    # Stelle sicher, dass das Logs-Verzeichnis existiert
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    
-    # Log-Dateiname mit Datum
-    log_filename = log_dir / f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    
-    # Konfiguriere das Root-Logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-    
-    # Formatter für detaillierte Ausgabe
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    
-    # Handler für Konsole
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
-    
-    # Handler für Datei
-    file_handler = logging.FileHandler(log_filename)
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
-    
-    return root_logger
+# Konfiguration des Logging-Systems
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("logs/main.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
-def load_config(config_file='config.json'):
-    """Lädt die Konfigurationsdatei"""
-    logger = logging.getLogger("Config")
+logger = logging.getLogger("main")
+
+def setup_directories():
+    """Erstellt die notwendigen Verzeichnisse, falls sie nicht existieren."""
+    directories = [
+        "logs",
+        "data",
+        "data/config",
+        "data/models",
+        "data/backtest_results",
+        "data/knowledge",
+        "data/transcripts",
+        "data/tax",
+        "data/tax/reports",
+        "data/black_swan"
+    ]
     
-    try:
-        if os.path.exists(config_file):
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-                logger.info(f"Konfiguration aus {config_file} geladen")
-                return config
-        else:
-            logger.warning(f"Konfigurationsdatei {config_file} nicht gefunden. Verwende Standardwerte.")
-            # Standard-Konfiguration
-            return {
-                "telegram_token": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
-                "admin_ids": [],
-                "log_level": "INFO"
-            }
-    except Exception as e:
-        logger.error(f"Fehler beim Laden der Konfiguration: {str(e)}")
-        logger.error(traceback.format_exc())
-        sys.exit(1)
+    for directory in directories:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        logger.debug(f"Verzeichnis sichergestellt: {directory}")
+
+def parse_arguments():
+    """Parst Kommandozeilenargumente."""
+    parser = argparse.ArgumentParser(description="Gemma Trading Bot - Ein auf Gemma 3 basierender Krypto-Trading-Bot")
+    
+    parser.add_argument("--config", type=str, default="data/config/config.yaml",
+                        help="Pfad zur Konfigurationsdatei")
+    
+    parser.add_argument("--mode", type=str, choices=["live", "paper", "backtest", "learn"],
+                        help="Trading-Modus (überschreibt Konfigurationsdatei)")
+    
+    parser.add_argument("--debug", action="store_true",
+                        help="Debug-Modus aktivieren")
+    
+    parser.add_argument("--no-telegram", action="store_true",
+                        help="Telegram-Bot deaktivieren")
+    
+    parser.add_argument("--process-transcript", type=str,
+                        help="Transkriptdatei verarbeiten und beenden")
+    
+    parser.add_argument("--learn", action="store_true",
+                        help="Starten im Lernmodus (trainiere Modelle)")
+    
+    return parser.parse_args()
 
 def main():
-    """Hauptfunktion zum Starten des Bots"""
-    # Logging einrichten
-    logger = setup_logging()
-    logger.info("=== BOT STARTET ===")
+    """Hauptfunktion des Trading Bots."""
+    # Start-Nachricht
+    logger.info("=======================================")
+    logger.info("Gemma Trading Bot wird gestartet...")
+    logger.info("=======================================")
+    
+    # Lade Umgebungsvariablen aus .env-Datei
+    load_dotenv()
+    
+    # Verzeichnisse einrichten
+    setup_directories()
+    
+    # Kommandozeilenargumente parsen
+    args = parse_arguments()
+    
+    # Debug-Modus
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Debug-Modus aktiviert")
+    
+    # Config Manager initialisieren
+    config_manager = ConfigManager(args.config)
+    
+    # Main Controller initialisieren
+    controller = MainController(config_manager)
+    
+    # Prüfen, ob Transkript-Verarbeitung angefordert wurde
+    if args.process_transcript:
+        logger.info(f"Verarbeite Transkript: {args.process_transcript}")
+        result = controller.process_transcript(args.process_transcript)
+        logger.info(f"Ergebnis: {json.dumps(result, indent=2)}")
+        return
+    
+    # Prüfen, ob der Lernmodus aktiviert ist
+    if args.learn:
+        logger.info("Starte im Lernmodus")
+        controller.start(mode="learn", auto_trade=False)
+        controller.train_models()
+        return
+    
+    # Trading-Modus überschreiben, falls angegeben
+    mode = args.mode
+    if mode:
+        logger.info(f"Trading-Modus via Kommandozeile gesetzt: {mode}")
+    else:
+        # Ansonsten aus der Konfiguration lesen
+        mode = config_manager.get_config("trading").get("mode", "paper")
+        logger.info(f"Trading-Modus aus Konfiguration: {mode}")
+    
+    # Telegram deaktivieren, falls angefordert
+    if args.no_telegram:
+        logger.info("Telegram-Bot wird deaktiviert")
+        config = config_manager.get_config()
+        if "telegram" in config:
+            config["telegram"]["enabled"] = False
+            config_manager.update_section("telegram", config["telegram"])
+    
+    # Bot starten
+    controller.start(auto_trade=(mode == "live"))
     
     try:
-        # Konfiguration laden
-        config = load_config()
-        
-        # Telegram-Token überprüfen
-        telegram_token = config.get('telegram_token', os.environ.get("TELEGRAM_BOT_TOKEN"))
-        if not telegram_token:
-            logger.error("Kein Telegram-Token gefunden. Bitte in config.json oder als Umgebungsvariable TELEGRAM_BOT_TOKEN angeben.")
-            sys.exit(1)
-        
-        # Admin-IDs (können für spezielle Benachrichtigungen verwendet werden)
-        admin_ids = config.get('admin_ids', [])
-        
-        # Log-Level aus Konfiguration
-        log_level_str = config.get('log_level', 'INFO')
-        log_level = getattr(logging, log_level_str, logging.INFO)
-        
-        # Stelle Root-Logger auf das richtige Level ein
-        logging.getLogger().setLevel(log_level)
-        
-        logger.info(f"Konfiguration geladen: Log-Level={log_level_str}, Admins={admin_ids}")
-        
-        # Telegram-Bot initialisieren
-        logger.info("Initialisiere Telegram-Bot...")
-        bot = TelegramBot(
-            token=telegram_token,
-            admin_ids=admin_ids,
-            log_level=log_level
-        )
-        
-        # Registriere benutzerdefinierte Handler (Beispiel)
-        # async def handle_stats(update, context):
-        #     await update.message.reply_text("Hier sind deine Statistiken...")
-        # bot.register_command_handler("stats", handle_stats)
-        
-        # Bot starten
-        logger.info("Starte Bot...")
-        webhook_url = config.get('webhook_url')  # Optional für Webhook-Modus
-        bot.run(webhook_url)
-        
+        # Bot laufen lassen (blockierend)
+        controller.start()
     except KeyboardInterrupt:
-        logger.info("Bot durch Benutzer gestoppt (KeyboardInterrupt)")
+        logger.info("Benutzerabbruch erkannt")
     except Exception as e:
-        logger.critical(f"Unerwarteter Fehler: {str(e)}")
-        logger.critical(traceback.format_exc())
-        sys.exit(1)
+        logger.error(f"Fehler im Hauptprogramm: {str(e)}", exc_info=True)
+    finally:
+        # Alles sauber beenden
+        controller.stop()
+        logger.info("Gemma Trading Bot beendet")
 
 if __name__ == "__main__":
     main()
+
+# Am Anfang der main.py
+from src.utils.logging_setup import setup_logging
+import logging
+
+# Logging initialisieren
+logger = setup_logging(log_level=logging.INFO)
+
