@@ -12,10 +12,8 @@ import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
 import pandas as pd
-import io
 from pathlib import Path
 import requests
-from PIL import Image
 
 # Für Headless-Server (ohne GUI)
 matplotlib.use('Agg')
@@ -23,16 +21,11 @@ matplotlib.use('Agg')
 class TelegramInterface:
     """
     Telegram-Bot-Schnittstelle für die Fernsteuerung und Benachrichtigungen des Trading-Bots.
-    Ermöglicht die Interaktion mit dem Bot über Telegram-Nachrichten und bietet ein
-    benutzerfreundliches Dashboard mit Trading-Informationen und Steuerungselementen.
     """
     
     def __init__(self, config: Dict[str, Any], main_controller=None):
         """
         Initialisiert die Telegram-Schnittstelle.
-        Args:
-            config: Konfigurationseinstellungen mit Bot-Token und erlaubten Benutzern
-            main_controller: Referenz zum MainController für Zugriff auf andere Module
         """
         self.logger = logging.getLogger("TelegramInterface")
         self.logger.info("Initialisiere TelegramInterface...")
@@ -40,7 +33,7 @@ class TelegramInterface:
         # API-Konfiguration
         self.bot_token = config.get('bot_token', os.getenv('TELEGRAM_BOT_TOKEN', ''))
         
-        # String oder Liste von IDs in Integer-Liste konvertieren
+        # String oder Liste von IDs in String-Liste konvertieren
         allowed_users_raw = config.get('allowed_users', [])
         if isinstance(allowed_users_raw, str):
             # String von kommagetrennten IDs parsen
@@ -112,8 +105,6 @@ class TelegramInterface:
     def register_commands(self, commands: Dict[str, Callable]):
         """
         Registriert benutzerdefinierte Befehle vom MainController.
-        Args:
-            commands: Dictionary mit Befehlsnamen als Schlüssel und Callback-Funktionen als Werte
         """
         self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle")
         self.commands = commands
@@ -196,6 +187,7 @@ class TelegramInterface:
             user_id = None
             text = None
             callback_data = None
+            message_id = None
             
             # Prüfen ob Nachricht oder Callback-Query
             if "message" in update:
@@ -203,11 +195,13 @@ class TelegramInterface:
                 chat_id = message.get("chat", {}).get("id")
                 user_id = message.get("from", {}).get("id")
                 text = message.get("text", "")
+                message_id = message.get("message_id")
             elif "callback_query" in update:
                 callback_query = update["callback_query"]
                 chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
                 user_id = callback_query.get("from", {}).get("id")
                 callback_data = callback_query.get("data")
+                message_id = callback_query.get("message", {}).get("message_id")
                 
                 # Callback-Query beantworten
                 self.session.post(
@@ -221,7 +215,7 @@ class TelegramInterface:
             
             # Callback-Anfragen verarbeiten
             if callback_data:
-                self._handle_callback_data(chat_id, callback_data, callback_query.get("message", {}).get("message_id"))
+                self._handle_callback_data(chat_id, callback_data, message_id)
                 return
             
             # Textnachrichten verarbeiten
@@ -236,6 +230,47 @@ class TelegramInterface:
         except Exception as e:
             self.logger.error(f"Fehler bei der Update-Verarbeitung: {str(e)}")
             self.logger.error(traceback.format_exc())
+    
+    def _handle_callback_data(self, chat_id, callback_data, message_id=None):
+        """Verarbeitet Callback-Daten von Inline-Buttons"""
+        try:
+            # Je nach Callback-Data unterschiedliche Aktionen ausführen
+            if callback_data == "startbot":
+                self._handle_start_bot(chat_id)
+            elif callback_data == "stopbot":
+                self._handle_stop_bot(chat_id)
+            elif callback_data == "pausebot":
+                self._handle_pause_bot(chat_id)
+            elif callback_data == "resumebot":
+                self._handle_resume_bot(chat_id)
+            elif callback_data == "balance":
+                self._handle_balance(chat_id)
+            elif callback_data == "positions":
+                self._handle_positions(chat_id)
+            elif callback_data == "performance":
+                self._handle_performance(chat_id)
+            elif callback_data == "dashboard":
+                self._send_dashboard(chat_id)
+            elif callback_data == "refresh_status":
+                self._send_status_message(chat_id, message_id)
+            elif callback_data == "help":
+                self._process_command(chat_id, "/help")
+            elif callback_data == "status":
+                self._send_status_message(chat_id)
+            elif callback_data == "refresh_positions":
+                self._handle_positions(chat_id)
+            elif callback_data == "close_all_positions":
+                self._confirm_close_all_positions(chat_id)
+            elif callback_data == "confirm_close_all":
+                self._execute_close_all_positions(chat_id)
+            elif callback_data == "cancel_close_all":
+                self._send_direct_message(chat_id, "Abgebrochen. Keine Positionen wurden geschlossen.")
+            else:
+                self._send_direct_message(chat_id, f"Unbekannte Aktion: {callback_data}")
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Callback-Verarbeitung: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            self._send_direct_message(chat_id, f"Fehler bei der Ausführung: {str(e)}")
     
     def _process_command(self, chat_id, command_text):
         """Verarbeitet einen Befehl"""
@@ -303,47 +338,6 @@ Sonstige Funktionen:
                 self._send_direct_message(chat_id, "Bitte gib den Pfad zum Transkript an.\nBeispiel: /processtranscript data/transcripts/mein_transkript.txt")
         else:
             self._send_direct_message(chat_id, f"Unbekannter Befehl: /{command}\nVerwende /help für verfügbare Befehle.")
-    
-    def _handle_callback_data(self, chat_id, callback_data, message_id=None):
-        """Verarbeitet Callback-Daten von Inline-Buttons"""
-        try:
-            # Je nach Callback-Data unterschiedliche Aktionen ausführen
-            if callback_data == "startbot":
-                self._handle_start_bot(chat_id)
-            elif callback_data == "stopbot":
-                self._handle_stop_bot(chat_id)
-            elif callback_data == "pausebot":
-                self._handle_pause_bot(chat_id)
-            elif callback_data == "resumebot":
-                self._handle_resume_bot(chat_id)
-            elif callback_data == "balance":
-                self._handle_balance(chat_id)
-            elif callback_data == "positions":
-                self._handle_positions(chat_id)
-            elif callback_data == "performance":
-                self._handle_performance(chat_id)
-            elif callback_data == "dashboard":
-                self._send_dashboard(chat_id)
-            elif callback_data == "refresh_status":
-                self._send_status_message(chat_id, message_id)
-            elif callback_data == "help":
-                self._process_command(chat_id, "/help")
-            elif callback_data == "status":
-                self._send_status_message(chat_id)
-            elif callback_data == "refresh_positions":
-                self._handle_positions(chat_id)
-            elif callback_data == "close_all_positions":
-                self._confirm_close_all_positions(chat_id)
-            elif callback_data == "confirm_close_all":
-                self._execute_close_all_positions(chat_id)
-            elif callback_data == "cancel_close_all":
-                self._send_direct_message(chat_id, "Abgebrochen. Keine Positionen wurden geschlossen.")
-            else:
-                self._send_direct_message(chat_id, f"Unbekannte Aktion: {callback_data}")
-        except Exception as e:
-            self.logger.error(f"Fehler bei der Callback-Verarbeitung: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            self._send_direct_message(chat_id, f"Fehler bei der Ausführung: {str(e)}")
     
     def _handle_start_bot(self, chat_id):
         """Startet den Trading Bot"""
