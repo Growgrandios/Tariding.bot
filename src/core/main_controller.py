@@ -228,38 +228,25 @@ class MainController:
             self.state = BotState.ERROR
             raise
     
-    def start(self, mode: str = None, auto_trade: bool = True):
-        """
-        Startet den Trading Bot.
+def start(self, mode: str = None, auto_trade: bool = True):
+    # ... bestehender Code ...
+    try:
+        self.logger.info(f"Starte Trading Bot im Modus '{mode}'...")
+        self.previous_state = self.state
+        self.state = BotState.RUNNING
+
+        # Module starten
+        # Datenpipeline starten (für Marktdaten)
+        self.data_pipeline.start_auto_updates()
+        self.module_status['data_pipeline']['status'] = "running"
         
-        Args:
-            mode: Trading-Modus ('live', 'paper', 'backtest', 'learn')
-            auto_trade: Ob automatisches Trading aktiviert werden soll
+        # WICHTIG: Sicherstellen, dass die Datenpipeline verbunden ist
+        # Diese Zeile erneut aufrufen, um die Verbindung zu garantieren
+        self.black_swan_detector.set_data_pipeline(self.data_pipeline)
         
-        Returns:
-            True bei Erfolg, False bei Fehler
-        """
-        if self.state == BotState.RUNNING:
-            self.logger.warning("Bot läuft bereits")
-            return False
-        
-        if self.state == BotState.ERROR:
-            self.logger.error("Bot kann aufgrund von Fehlern nicht gestartet werden")
-            return False
-        
-        try:
-            self.logger.info(f"Starte Trading Bot im Modus '{mode}'...")
-            self.previous_state = self.state
-            self.state = BotState.RUNNING
-            
-            # Module starten
-            # Datenpipeline starten (für Marktdaten)
-            self.data_pipeline.start_auto_updates()
-            self.module_status['data_pipeline']['status'] = "running"
-            
-            # Black Swan Detector starten
-            self.black_swan_detector.start_monitoring()
-            self.module_status['black_swan_detector']['status'] = "running"
+        # Black Swan Detector starten
+        self.black_swan_detector.start_monitoring()
+        self.module_status['black_swan_detector']['status'] = "running"
             
             # Telegram-Bot starten
             self.telegram_interface.start()
