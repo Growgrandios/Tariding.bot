@@ -22,48 +22,42 @@ os.environ['PYTHONUNBUFFERED'] = '1'  # Deaktiviert Signalhandling im Thread
 
 # Innerhalb der TelegramInterface-Klasse:
 def _run_bot(self):
-    """Führt den Telegram-Bot im Hintergrund aus, ohne asyncio zu verwenden."""
+    """Führt den Telegram-Bot im Hintergrund aus, ohne Signal-Handler zu verwenden."""
     try:
-        # Initialisiere Requests für HTTP-Anfragen
-        import requests
-        self.session = requests.Session()
+        # Eigenen Event-Loop erstellen
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         
-        # Variable für das letzte abgerufene Update
-        last_update_id = 0
-        self.shutdown_requested = False
-        
-        self.logger.info("Bot-Thread gestartet, beginne mit Polling")
-        
-        # Endlosschleife für manuelles Polling
-        while not self.shutdown_requested:
-            try:
-                # Direkter API-Aufruf ohne asyncio
-                response = self.session.get(
-                    f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
-                    params={
-                        "offset": last_update_id + 1,
-                        "timeout": 30
-                    },
-                    timeout=35  # Etwas höher als der Telegram-Timeout
-                )
-                response.raise_for_status()
-                
-                # Updates verarbeiten
-                data = response.json()
-                if data.get("ok") and data.get("result"):
-                    for update in data["result"]:
-                        # Update-ID aktualisieren
-                        last_update_id = update["update_id"]
-                        
-                        # Update verarbeiten
-                        self._handle_update_via_api(update)
-                
-            except Exception as e:
-                self.logger.error(f"Fehler beim Abrufen von Updates: {str(e)}")
-                time.sleep(5)  # Pause bei Fehlern
+        # Eigene Polling-Funktion ohne Signal-Handler
+        async def custom_polling():
+            # Bot initialisieren ohne run_polling
+            await self.application.initialize()
+            
+            # Manuelles Polling
+            offset = 0
+            while True:
+                try:
+                    # Direkt updates abrufen
+                    updates = await self.application.bot.get_updates(
+                        offset=offset,
+                        timeout=30,
+                        allowed_updates=Update.ALL_TYPES
+                    )
                     
+                    # Updates manuell verarbeiten
+                    for update in updates:
+                        offset = update.update_id + 1
+                        await self.application.process_update(update)
+                        
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    self.logger.error(f"Fehler beim Polling: {str(e)}")
+                    await asyncio.sleep(1)
+        
+        # Eigene Polling-Funktion starten
+        self.loop.run_until_complete(custom_polling())
     except Exception as e:
-        self.logger.error(f"Kritischer Fehler im Bot-Thread: {str(e)}")
+        self.logger.error(f"Fehler im Bot-Thread: {str(e)}")
         self.logger.error(traceback.format_exc())
     finally:
         self.logger.info("Bot-Thread beendet")
