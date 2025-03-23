@@ -1,5 +1,3 @@
-# telegram_interface.py
-
 import os
 import logging
 import threading
@@ -206,12 +204,6 @@ class TelegramInterface:
                 user_id = callback_query.get("from", {}).get("id")
                 callback_data = callback_query.get("data")
                 message_id = callback_query.get("message", {}).get("message_id")
-                
-                # Callback-Query beantworten (WICHTIG: Muss bei jedem Callback passieren!)
-                self.session.post(
-                    f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
-                    json={"callback_query_id": callback_query["id"]}
-                )
             
             # Autorisierung prüfen
             if not chat_id or not self._is_authorized(str(user_id)):
