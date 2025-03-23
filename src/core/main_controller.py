@@ -3,11 +3,6 @@
 import os
 import sys
 import logging
-import threading# main_controller.py
-
-import os
-import sys
-import logging
 import threading
 import time
 import json
@@ -140,6 +135,15 @@ class MainController:
             self.data_pipeline = DataPipeline(api_keys)
             self.modules['data_pipeline'] = self.data_pipeline
             self.module_status['data_pipeline'] = {"status": "initialized", "errors": []}
+            
+            # Black Swan Detector
+            self.logger.info("Initialisiere BlackSwanDetector...")
+            blackswan_config = self.config_manager.get_config('black_swan_detector')
+            self.black_swan_detector = BlackSwanDetector(blackswan_config)
+            self.modules['black_swan_detector'] = self.black_swan_detector
+            self.module_status['black_swan_detector'] = {"status": "initialized", "errors": []}
+            
+            # Verbinde BlackSwanDetector mit DataPipeline
             self.black_swan_detector.set_data_pipeline(self.data_pipeline)
             
             # Live Trading Connector
@@ -157,13 +161,6 @@ class MainController:
             self.learning_module = LearningModule(learning_config)
             self.modules['learning_module'] = self.learning_module
             self.module_status['learning_module'] = {"status": "initialized", "errors": []}
-            
-            # Black Swan Detector
-            self.logger.info("Initialisiere BlackSwanDetector...")
-            blackswan_config = self.config_manager.get_config('black_swan_detector')
-            self.black_swan_detector = BlackSwanDetector(blackswan_config)
-            self.modules['black_swan_detector'] = self.black_swan_detector
-            self.module_status['black_swan_detector'] = {"status": "initialized", "errors": []}
             
             # Telegram Interface
             self.logger.info("Initialisiere TelegramInterface...")
@@ -197,17 +194,7 @@ class MainController:
             self.logger.error(traceback.format_exc())
             self.state = BotState.ERROR
             raise
-
-    def __init__(self, config):
-    # ... bestehender Initialisierungscode ...
-    
-    # Initialisiere Module
-    self.data_pipeline = DataPipeline(config.get('data_pipeline', {}))
-    self.black_swan_detector = BlackSwanDetector(config.get('black_swan_detector', {}))
-    
-    # Verbinde BlackSwanDetector mit DataPipeline
-    self.black_swan_detector.set_data_pipeline(self.data_pipeline)
-
+            
     def _connect_modules(self):
         """Verbindet die Module miteinander für Kommunikation und Datenaustausch."""
         try:
