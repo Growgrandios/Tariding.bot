@@ -13,8 +13,8 @@ from datetime import datetime
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
-    Updater, CommandHandler, CallbackQueryHandler, MessageHandler,
-    filters, CallbackContext, ConversationHandler
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
+    filters, ContextTypes, ConversationHandler
 )
 
 class TelegramInterface:
@@ -53,11 +53,11 @@ class TelegramInterface:
         self.is_ready = False
         self.is_running = False
         
-        # Updater und Dispatcher
+        # Application und Bot
         try:
-            self.updater = Updater(self.token, use_context=True)
-            self.dispatcher = self.updater.dispatcher
-            self.bot = self.updater.bot
+            # In v20+ we use Application instead of Updater
+            self.application = Application.builder().token(self.token).build()
+            self.bot = self.application.bot
             
             # Command Handlers registrieren
             self._register_handlers()
@@ -75,31 +75,31 @@ class TelegramInterface:
     def _register_handlers(self):
         """Registriert alle Command- und Callback-Handler."""
         # Basis-Befehle
-        self.dispatcher.add_handler(CommandHandler("start", self._cmd_welcome))
-        self.dispatcher.add_handler(CommandHandler("help", self._cmd_help))
+        self.application.add_handler(CommandHandler("start", self._cmd_welcome))
+        self.application.add_handler(CommandHandler("help", self._cmd_help))
         
         # Bot-Steuerungsbefehle
-        self.dispatcher.add_handler(CommandHandler("status", self._cmd_status))
-        self.dispatcher.add_handler(CommandHandler("startbot", self._cmd_start_bot))
-        self.dispatcher.add_handler(CommandHandler("stopbot", self._cmd_stop_bot))
-        self.dispatcher.add_handler(CommandHandler("pausebot", self._cmd_pause_bot))
-        self.dispatcher.add_handler(CommandHandler("resumebot", self._cmd_resume_bot))
+        self.application.add_handler(CommandHandler("status", self._cmd_status))
+        self.application.add_handler(CommandHandler("startbot", self._cmd_start_bot))
+        self.application.add_handler(CommandHandler("stopbot", self._cmd_stop_bot))
+        self.application.add_handler(CommandHandler("pausebot", self._cmd_pause_bot))
+        self.application.add_handler(CommandHandler("resumebot", self._cmd_resume_bot))
         
         # Trading-Befehle
-        self.dispatcher.add_handler(CommandHandler("balance", self._cmd_balance))
-        self.dispatcher.add_handler(CommandHandler("positions", self._cmd_positions))
-        self.dispatcher.add_handler(CommandHandler("orders", self._cmd_orders))
+        self.application.add_handler(CommandHandler("balance", self._cmd_balance))
+        self.application.add_handler(CommandHandler("positions", self._cmd_positions))
+        self.application.add_handler(CommandHandler("orders", self._cmd_orders))
         
         # Analyse-Befehle
-        self.dispatcher.add_handler(CommandHandler("performance", self._cmd_performance))
-        self.dispatcher.add_handler(CommandHandler("market", self._cmd_market))
-        self.dispatcher.add_handler(CommandHandler("prediction", self._cmd_prediction))
+        self.application.add_handler(CommandHandler("performance", self._cmd_performance))
+        self.application.add_handler(CommandHandler("market", self._cmd_market))
+        self.application.add_handler(CommandHandler("prediction", self._cmd_prediction))
         
         # Callback-Handler für Buttons
-        self.dispatcher.add_handler(CallbackQueryHandler(self._handle_button_press))
+        self.application.add_handler(CallbackQueryHandler(self._handle_button_press))
         
         # Fehlerhandler
-        self.dispatcher.add_error_handler(self._error_handler)
+        self.application.add_error_handler(self._error_handler)
     
     def start(self):
         """Startet den Telegram Bot im Hintergrund."""
@@ -113,7 +113,7 @@ class TelegramInterface:
             
         try:
             # Bot im Hintergrund starten
-            self.updater.start_polling()
+            self.application.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
             self.is_running = True
             self.logger.info("TelegramInterface erfolgreich gestartet")
             
@@ -141,7 +141,8 @@ class TelegramInterface:
             return True
             
         try:
-            self.updater.stop()
+            # In v20+ we use stop() on the application
+            self.application.stop()
             self.is_running = False
             self.logger.info("TelegramInterface erfolgreich gestoppt")
             return True
@@ -160,11 +161,11 @@ class TelegramInterface:
         """Prüft, ob ein Benutzer Admin-Rechte hat."""
         return str(user_id) in self.admin_users
     
-    def send_message(self, chat_id: int, text: str, parse_mode: str = ParseMode.HTML,
+    async def send_message(self, chat_id: int, text: str, parse_mode: str = ParseMode.HTML,
                      reply_markup: Any = None, disable_notification: bool = False) -> Optional[Any]:
         """Sendet eine Nachricht an einen Chat."""
         try:
-            return self.bot.send_message(
+            return await self.bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 parse_mode=parse_mode,
@@ -182,14 +183,14 @@ class TelegramInterface:
     
     # Button-Handler
     
-    def _handle_button_press(self, update: Update, context: CallbackContext):
+    async def _handle_button_press(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Verarbeitet Klicks auf Inline-Buttons."""
         query = update.callback_query
         user_id = query.from_user.id
         
         # Autorisierung prüfen
         if not self._is_user_authorized(user_id):
-            query.answer("❌ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            await query.answer("❌ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
             return
         
         try:
@@ -197,74 +198,74 @@ class TelegramInterface:
             callback_data = query.data
             
             # Bestätigung anzeigen
-            query.answer()
+            await query.answer()
             
             # Callback-Typen verarbeiten
             if callback_data == "menu":
                 # Hauptmenü anzeigen
-                self._show_main_menu(query.message)
+                await self._show_main_menu(query.message)
             elif callback_data == "status":
                 # Status abrufen (verzögerte Antwort über Edit)
-                query.edit_message_text("⏳ Aktualisiere Status...")
-                self._cmd_status(update, context)
+                await query.edit_message_text("⏳ Aktualisiere Status...")
+                await self._cmd_status(update, context)
             elif callback_data == "balance":
                 # Kontostand abrufen
-                query.edit_message_text("⏳ Rufe Kontostand ab...")
-                self._cmd_balance(update, context)
+                await query.edit_message_text("⏳ Rufe Kontostand ab...")
+                await self._cmd_balance(update, context)
             elif callback_data == "positions":
                 # Positionen abrufen
-                query.edit_message_text("⏳ Rufe Positionen ab...")
-                self._cmd_positions(update, context)
+                await query.edit_message_text("⏳ Rufe Positionen ab...")
+                await self._cmd_positions(update, context)
             elif callback_data == "orders":
                 # Orders abrufen
-                query.edit_message_text("⏳ Rufe Orders ab...")
-                self._cmd_orders(update, context)
+                await query.edit_message_text("⏳ Rufe Orders ab...")
+                await self._cmd_orders(update, context)
             elif callback_data == "performance":
                 # Performance abrufen
-                query.edit_message_text("⏳ Rufe Performance-Daten ab...")
-                self._cmd_performance(update, context)
+                await query.edit_message_text("⏳ Rufe Performance-Daten ab...")
+                await self._cmd_performance(update, context)
             elif callback_data == "startbot":
                 # Bot starten
-                query.edit_message_text("⏳ Starte Bot...")
-                self._cmd_start_bot(update, context)
+                await query.edit_message_text("⏳ Starte Bot...")
+                await self._cmd_start_bot(update, context)
             elif callback_data == "stopbot":
                 # Bot stoppen
-                query.edit_message_text("⏳ Stoppe Bot...")
-                self._cmd_stop_bot(update, context)
+                await query.edit_message_text("⏳ Stoppe Bot...")
+                await self._cmd_stop_bot(update, context)
             elif callback_data == "pausebot":
                 # Bot pausieren
-                query.edit_message_text("⏳ Pausiere Bot...")
-                self._cmd_pause_bot(update, context)
+                await query.edit_message_text("⏳ Pausiere Bot...")
+                await self._cmd_pause_bot(update, context)
             elif callback_data == "resumebot":
                 # Bot fortsetzen
-                query.edit_message_text("⏳ Setze Bot fort...")
-                self._cmd_resume_bot(update, context)
+                await query.edit_message_text("⏳ Setze Bot fort...")
+                await self._cmd_resume_bot(update, context)
             elif callback_data == "market":
                 # Marktdaten abrufen
-                query.edit_message_text("⏳ Rufe Marktdaten ab...")
-                self._cmd_market(update, context)
+                await query.edit_message_text("⏳ Rufe Marktdaten ab...")
+                await self._cmd_market(update, context)
             elif callback_data == "prediction":
                 # Prognose abrufen
-                query.edit_message_text("⏳ Rufe Prognose ab...")
-                self._cmd_prediction(update, context)
+                await query.edit_message_text("⏳ Rufe Prognose ab...")
+                await self._cmd_prediction(update, context)
             else:
                 # Unbekannter Callback
-                query.edit_message_text(f"Unbekannte Aktion: {callback_data}")
+                await query.edit_message_text(f"Unbekannte Aktion: {callback_data}")
         except Exception as e:
             self.logger.error(f"Fehler bei der Verarbeitung des Button-Klicks: {str(e)}")
             try:
-                query.edit_message_text(f"❌ Fehler: {str(e)}")
+                await query.edit_message_text(f"❌ Fehler: {str(e)}")
             except:
                 pass
     
     # Command-Handler
     
-    def _cmd_welcome(self, update: Update, context: CallbackContext):
+    async def _cmd_welcome(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Begrüßt den Benutzer und zeigt Hauptmenü an."""
         user_id = update.effective_user.id
         
         if not self._is_user_authorized(user_id):
-            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            await update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
             return
         
         user_name = update.effective_user.first_name
@@ -297,6 +298,11 @@ class TelegramInterface:
         ]
         
         reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_html(
+            welcome_text,
+            reply_markup=reply_markup
+        )
         
         update.message.reply_html(
             welcome_text,
