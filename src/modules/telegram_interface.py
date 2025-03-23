@@ -1,563 +1,627 @@
-# telegram_interface.py
+# telegram_module.py
 
-import os
 import logging
-import threading
-import time
-import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union, Tuple, Callable
 import traceback
-import matplotlib.pyplot as plt
-import matplotlib
-import numpy as np
-import pandas as pd
-from pathlib import Path
-import requests
+from datetime import datetime
+from typing import Dict, Any, List, Callable, Optional, Union
 
-# Für Headless-Server (ohne GUI)
-matplotlib.use('Agg')
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-class TelegramInterface:
+class TelegramBot:
     """
-    Telegram-Bot-Schnittstelle für die Fernsteuerung und Benachrichtigungen des Trading-Bots.
+    Ein Telegram-Bot mit detailliertem Logging für Fehlersuche.
+    Protokolliert jede Benutzerinteraktion in Echtzeit auf der Konsole.
     """
-    def __init__(self, config: Dict[str, Any], main_controller=None):
+
+    def __init__(self, token: str, admin_ids: List[int] = None, log_level=logging.INFO):
         """
-        Initialisiert die Telegram-Schnittstelle.
+        Initialisiert den TelegramBot.
+        
+        Args:
+            token: Telegram Bot API Token
+            admin_ids: Liste von Telegram-Benutzer-IDs mit Admin-Rechten
+            log_level: Logging-Level (Default: INFO)
         """
-        # Logger mit Konsolen-Ausgabe konfigurieren
-        self.logger = logging.getLogger("TelegramInterface")
+        # Logger konfigurieren
+        self.logger = logging.getLogger("TelegramBot")
+        self.logger.setLevel(log_level)
+        self.admin_ids = admin_ids or []
         
-        # Direkter Konsolen-Handler für verbesserte Sichtbarkeit
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('\033[92m%(asctime)s - TELEGRAM - %(levelname)s - %(message)s\033[0m')
-        console_handler.setFormatter(formatter)
-        self.logger.addHandler(console_handler)
-        self.logger.setLevel(logging.DEBUG)
+        # Bot initialisieren
+        self.logger.info("=== TELEGRAM BOT INITIALISIERUNG STARTET ===")
+        self.application = Application.builder().token(token).build()
         
-        print("\n" + "="*80)
-        print("TELEGRAM INTERFACE INITIALISIERUNG")
-        print("="*80 + "\n")
+        # Handler registrieren
+        self._register_handlers()
         
-        self.logger.info("Initialisiere TelegramInterface...")
-
-        # Debug-Modus aktivieren - WICHTIG für Fehlerbehebung
-        self.debug_mode = config.get('debug_mode', True)
-        if self.debug_mode:
-            self.logger.info("Debug-Modus aktiviert - alle Button-Aktionen werden protokolliert")
-
-        # API-Konfiguration
-        self.bot_token = config.get('bot_token', os.getenv('TELEGRAM_BOT_TOKEN', ''))
-        print(f"Bot-Token konfiguriert: {'*'*5}{self.bot_token[-5:] if self.bot_token else 'NICHT KONFIGURIERT'}")
+        # Callback-Funktionen-Dictionary
+        self.command_handlers = {}
+        self.button_handlers = {}
         
-        # String oder Liste von IDs in String-Liste konvertieren
-        allowed_users_raw = config.get('allowed_users', [])
-        if isinstance(allowed_users_raw, str):
-            self.allowed_users = [str(user_id.strip()) for user_id in allowed_users_raw.split(',') if user_id.strip()]
-        elif isinstance(allowed_users_raw, list):
-            self.allowed_users = [str(user_id) for user_id in allowed_users_raw if user_id]
-        else:
-            self.allowed_users = []
-
-        # Prüfen, ob Token und Benutzer konfiguriert sind
-        if not self.bot_token:
-            self.logger.error("Kein Telegram-Bot-Token konfiguriert")
-            print("KRITISCHER FEHLER: Kein Telegram-Bot-Token konfiguriert!")
-            self.is_configured = False
-        elif not self.allowed_users:
-            self.logger.warning("Keine erlaubten Telegram-Benutzer konfiguriert")
-            print("WARNUNG: Keine erlaubten Telegram-Benutzer konfiguriert!")
-            self.is_configured = True  # Wir können trotzdem starten, aber keine Befehle annehmen
-        else:
-            self.is_configured = True
-            print(f"Erlaubte Benutzer: {self.allowed_users}")
-            self.logger.info(f"{len(self.allowed_users)} erlaubte Benutzer konfiguriert")
-
-        # Benachrichtigungskonfiguration
-        self.notification_level = config.get('notification_level', 'INFO')
-        self.status_update_interval = config.get('status_update_interval', 3600)  # Sekunden
-        self.commands_enabled = config.get('commands_enabled', True)
-
-        # Begrenzer für Benachrichtigungen
-        self.notification_cooldown = config.get('notification_cooldown', 60)  # Sekunden
-        self.last_notification_time = {}  # Dict für Zeitstempel der letzten Benachrichtigung pro Priorität
-        self.max_notifications_per_hour = {
-            'low': config.get('max_low_priority_per_hour', 10),
-            'normal': config.get('max_normal_priority_per_hour', 20),
-            'high': config.get('max_high_priority_per_hour', 30),
-            'critical': config.get('max_critical_priority_per_hour', 50)
-        }
-        self.notification_counts = {
-            'low': 0,
-            'normal': 0,
-            'high': 0,
-            'critical': 0
-        }
-        self.notification_reset_time = datetime.now() + timedelta(hours=1)
-
-        # Hauptcontroller-Referenz
-        self.main_controller = main_controller
-
-        # Thread für Bot-Updates
-        self.bot_thread = None
-        self.is_running = False
-
-        # Befehlsreferenzen
-        self.commands = {}
-
-        # Verzeichnis für aufgezeichnete Transkripte
-        self.transcript_dir = Path('data/transcripts')
-        self.transcript_dir.mkdir(parents=True, exist_ok=True)
-
-        # Verzeichnis für temporäre Grafiken
-        self.charts_dir = Path('data/charts')
-        self.charts_dir.mkdir(parents=True, exist_ok=True)
-
-        # HTTP Session für Requests
-        self.session = None
-
-        # Verarbeitete Update-IDs speichern
-        self.processed_updates = set()
-        
-        self.logger.info("TelegramInterface erfolgreich initialisiert")
-        print("\n" + "="*80)
-        print("TELEGRAM INTERFACE BEREIT")
-        print("="*80 + "\n")
-
-    def register_commands(self, commands: Dict[str, Callable]):
-        """
-        Registriert benutzerdefinierte Befehle vom MainController.
-        """
-        print(f"Registriere {len(commands)} benutzerdefinierte Befehle:")
-        for cmd_name in commands:
-            print(f" - /{cmd_name}")
-            
-        self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle")
-        self.commands = commands
-
-    def start(self):
-        """Startet den Telegram-Bot in einem separaten Thread."""
-        if not self.is_configured:
-            self.logger.warning("Telegram-Bot nicht konfiguriert, kann nicht gestartet werden")
-            print("FEHLER: Telegram-Bot nicht konfiguriert, kann nicht gestartet werden")
-            return False
-
-        if self.is_running:
-            self.logger.warning("Telegram-Bot läuft bereits")
-            return True
-
-        try:
-            print("\n" + "="*80)
-            print("STARTE TELEGRAM BOT...")
-            print("="*80 + "\n")
-            
-            self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
-            self.bot_thread.start()
-            
-            # Kurz warten, um sicherzustellen, dass der Bot gestartet wird
-            time.sleep(1)
-            self.is_running = True
-            self.logger.info("Telegram-Bot gestartet")
-            print("Telegram-Bot erfolgreich gestartet! Warte auf Befehle...")
-
-            # Initialen Status an alle Benutzer senden
-            self._send_status_to_all_users("Bot gestartet", "Der Trading Bot wurde erfolgreich gestartet und ist bereit für Befehle.")
-
-            # Timer für regelmäßige Statusupdates starten
-            if self.status_update_interval > 0:
-                self._start_status_update_timer()
-
-            return True
-        except Exception as e:
-            self.logger.error(f"Fehler beim Starten des Telegram-Bots: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            print(f"KRITISCHER FEHLER beim Starten des Telegram-Bots: {str(e)}")
-            return False
-
-    def _run_bot(self):
-        """Führt den Telegram-Bot komplett ohne asyncio und Signal-Handler aus"""
-        try:
-            self.session = requests.Session()
-            last_update_id = 0
-            self.logger.info("Bot-Thread gestartet (HTTP-Polling-Modus)")
-            print("Bot-Thread gestartet - HTTP-Polling aktiv")
-
-            while self.is_running:
-                try:
-                    # Direkter API-Aufruf mit Long-Polling
-                    print(f"Polling für Updates (offset={last_update_id + 1})...")
-                    response = self.session.get(
-                        f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
-                        params={
-                            "offset": last_update_id + 1,
-                            "timeout": 30,
-                            "allowed_updates": ["message", "callback_query"]
-                        },
-                        timeout=35
-                    )
-                    
-                    if response.status_code != 200:
-                        print(f"FEHLER: API-Anfrage fehlgeschlagen mit Status {response.status_code}")
-                        print(f"Antwort: {response.text}")
-                        self.logger.error(f"API-Anfrage fehlgeschlagen: {response.status_code} - {response.text}")
-                        time.sleep(5)
-                        continue
-
-                    response.raise_for_status()
-                    
-                    # Verarbeite Updates
-                    data = response.json()
-                    if not data.get("ok", False):
-                        print(f"FEHLER: API-Anfrage nicht erfolgreich: {data.get('description', 'Unbekannter Fehler')}")
-                        self.logger.error(f"API-Anfrage nicht erfolgreich: {data}")
-                        time.sleep(5)
-                        continue
-                        
-                    updates = data.get("result", [])
-                    if updates:
-                        print(f"EMPFANGEN: {len(updates)} neue Updates")
-                    
-                    for update in updates:
-                        last_update_id = update["update_id"]
-                        
-                        # Prüfen, ob dieses Update bereits verarbeitet wurde
-                        if update["update_id"] not in self.processed_updates:
-                            self._handle_raw_update(update)
-                            self.processed_updates.add(update["update_id"])
-                        else:
-                            print(f"Update {update['update_id']} wurde bereits verarbeitet, überspringe")
-                    
-                    # Begrenze die Größe der verarbeiteten Updates
-                    if len(self.processed_updates) > 1000:
-                        self.processed_updates = set(list(self.processed_updates)[-500:])
-                        
-                except Exception as e:
-                    self.logger.error(f"Polling-Fehler: {str(e)}")
-                    print(f"POLLING-FEHLER: {str(e)}")
-                    traceback.print_exc()
-                    time.sleep(5)
-
-        except Exception as e:
-            self.logger.error(f"Kritischer Bot-Fehler: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            print(f"KRITISCHER BOT-FEHLER: {str(e)}")
-            traceback.print_exc()
-        finally:
-            self.logger.info("Bot-Thread beendet")
-            print("Bot-Thread beendet")
-            self.is_running = False
-
-    def _handle_raw_update(self, update):
-        """Verarbeitet ein Telegram-Update mit ausführlichem Debugging"""
-        try:
-            # Ausführliches Debugging - Zeige das vollständige Update in der Konsole
-            print("\n" + "="*80)
-            update_type = "BUTTON-DRUCK" if "callback_query" in update else "NACHRICHT"
-            print(f"TELEGRAM {update_type} EMPFANGEN (ID: {update.get('update_id')})")
-            print("-"*80)
-            print(json.dumps(update, indent=2))
-            print("="*80 + "\n")
-            
-            self.logger.info(f"Update-ID: {update.get('update_id')} - Typ: {'callback_query' if 'callback_query' in update else 'message'}")
-
-            # Chat_id und Text extrahieren - abhängig vom Update-Typ
-            chat_id = None
-            user_id = None
-            text = None
-            callback_data = None
-            message_id = None
-
-            # Prüfen ob Nachricht oder Callback-Query
-            if "message" in update:
-                self.logger.info("Nachricht erkannt")
-                message = update["message"]
-                chat_id = message.get("chat", {}).get("id")
-                user_id = message.get("from", {}).get("id")
-                text = message.get("text", "")
-                message_id = message.get("message_id")
-                
-                print(f"NACHRICHT: Text='{text}', Chat-ID={chat_id}, User-ID={user_id}, Message-ID={message_id}")
-                
-            elif "callback_query" in update:
-               # Autorisierung prüfen
-            if not chat_id:
-                self.logger.warning(f"Keine Chat-ID gefunden in Update {update.get('update_id')}")
-                print(f"FEHLER: Keine Chat-ID gefunden in Update {update.get('update_id')}")
-                return
-                
-            if not self._is_authorized(str(user_id)):
-                self.logger.warning(f"Nicht autorisierter Zugriff von User ID: {user_id}")
-                print(f"SICHERHEIT: Nicht autorisierter Zugriff von User ID: {user_id}")
-                return
-
-            # Callback-Query beantworten (WICHTIG für Buttons)
-            if "callback_query" in update:
-                try:
-                    callback_id = update["callback_query"]["id"]
-                    print(f"Beantworte Callback-ID: {callback_id}")
-                    self.logger.info(f"Beantworte Callback: {callback_id}")
-
-                    # Antwort an Telegram senden (wichtig für Button-Funktionalität!)
-                    answer_url = f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery"
-                    answer_data = {"callback_query_id": callback_id}
-                    
-                    print(f"API-Anfrage: POST {answer_url}")
-                    response = self.session.post(answer_url, json=answer_data)
-                    
-                    print(f"TELEGRAM ANTWORT: Status={response.status_code}")
-                    print(f"Antwort-Inhalt: {response.text}")
-                    
-                    # Kurze Verzögerung für bessere Verarbeitung
-                    time.sleep(0.3)
-                    
-                except Exception as e:
-                    print(f"CALLBACK-FEHLER: {str(e)}")
-                    traceback.print_exc()
-                    self.logger.error(f"Fehler beim Beantworten der Callback-Query: {str(e)}")
-
-            # Callback-Anfragen verarbeiten
-            if callback_data:
-                self.logger.info(f"Verarbeite Callback-Daten: {callback_data}")
-                print(f"Verarbeite Button-Callback: '{callback_data}' von Chat {chat_id}")
-                self._handle_callback_data(chat_id, callback_data, message_id)
-                return
-
-            # Textnachrichten verarbeiten
-            if text:
-                self.logger.info(f"Verarbeite Text: {text}")
-                print(f"Verarbeite Text: '{text}' von Chat {chat_id}")
-                
-                # Befehle verarbeiten (beginnen mit /)
-                if text.startswith("/"):
-                    self._process_command(chat_id, text)
-                # Normale Nachrichten
-                else:
-                    self._send_direct_message(chat_id, "Ich verstehe nur Befehle. Verwende /help für eine Liste der verfügbaren Befehle.")
-
-        except Exception as e:
-            self.logger.error(f"Fehler bei der Update-Verarbeitung: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            print(f"FEHLER bei Update-Verarbeitung: {str(e)}")
-            traceback.print_exc()
-
-    def _handle_callback_data(self, chat_id, callback_data, message_id=None):
-        """Verarbeitet Callback-Daten von Inline-Buttons"""
-        try:
-            self.logger.info(f"Verarbeite Callback-Daten: {callback_data} von Chat {chat_id}")
-            print(f"\n{'='*40}")
-            print(f"BUTTON-AKTION: '{callback_data}' von Chat {chat_id}")
-            print(f"{'='*40}\n")
-
-            # Debugging: Schreibe Callback-Info in eine Logdatei
-            with open("button_log.txt", "a") as f:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                f.write(f"{timestamp} - Chat {chat_id} - Button: {callback_data}\n")
-
-            # Je nach Callback-Data unterschiedliche Aktionen ausführen
-            if callback_data == "startbot":
-                print(f"Aktion: Bot starten")
-                self._handle_start_bot(chat_id)
-            elif callback_data == "stopbot":
-                print(f"Aktion: Bot stoppen")
-                self._handle_stop_bot(chat_id)
-            elif callback_data == "pausebot":
-                print(f"Aktion: Bot pausieren")
-                self._handle_pause_bot(chat_id)
-            elif callback_data == "resumebot":
-                print(f"Aktion: Bot fortsetzen")
-                self._handle_resume_bot(chat_id)
-            elif callback_data == "balance":
-                print(f"Aktion: Kontostand abrufen")
-                self._handle_balance(chat_id)
-            elif callback_data == "positions":
-                print(f"Aktion: Positionen abrufen")
-                self._handle_positions(chat_id)
-            elif callback_data == "performance":
-                print(f"Aktion: Performance abrufen")
-                self._handle_performance(chat_id)
-            elif callback_data == "dashboard":
-                print(f"Aktion: Dashboard anzeigen")
-                self._send_dashboard(chat_id)
-            elif callback_data == "refresh_status":
-                print(f"Aktion: Status aktualisieren")
-                self._send_status_message(chat_id, message_id)
-            elif callback_data == "help":
-                print(f"Aktion: Hilfe anzeigen")
-                self._process_command(chat_id, "/help")
-            elif callback_data == "status":
-                print(f"Aktion: Status anzeigen")
-                self._send_status_message(chat_id)
-            elif callback_data == "refresh_positions":
-                print(f"Aktion: Positionen aktualisieren")
-                self._handle_positions(chat_id)
-            elif callback_data == "close_all_positions":
-                print(f"Aktion: Alle Positionen schließen (Bestätigung)")
-                self._confirm_close_all_positions(chat_id)
-            elif callback_data == "confirm_close_all":
-                print(f"Aktion: Alle Positionen schließen (Ausführung)")
-                self._execute_close_all_positions(chat_id)
-            elif callback_data == "cancel_close_all":
-                print(f"Aktion: Schließen aller Positionen abgebrochen")
-                self._send_direct_message(chat_id, "Abgebrochen. Keine Positionen wurden geschlossen.")
-            else:
-                print(f"Aktion: Unbekannte Callback-Daten: {callback_data}")
-                self._send_direct_message(chat_id, f"Unbekannte Aktion: {callback_data}")
-
-        except Exception as e:
-            self.logger.error(f"Fehler bei der Callback-Verarbeitung: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            print(f"FEHLER bei Button-Verarbeitung: {str(e)}")
-            traceback.print_exc()
-            self._send_direct_message(chat_id, f"Fehler bei der Ausführung: {str(e)}")
-
-    def _is_authorized(self, user_id):
-        """Prüft, ob ein Benutzer autorisiert ist"""
-        if not self.allowed_users:
-            self.logger.warning("Keine erlaubten Benutzer konfiguriert")
-            return False
-            
-        is_authorized = str(user_id) in self.allowed_users
-        
-        if is_authorized:
-            print(f"Benutzer {user_id} ist autorisiert ✓")
-        else:
-            print(f"Benutzer {user_id} ist NICHT autorisiert ✗")
-            
-        return is_authorized
-
-    def _send_direct_message(self, chat_id, text, reply_markup=None, parse_mode=None):
-        """Sendet eine Direktnachricht an einen Chat"""
-        if not self.is_running or not self.is_configured:
-            self.logger.warning(f"Bot nicht bereit zum Senden von Nachrichten an {chat_id}")
-            return False
-
-        try:
-            print(f"Sende Nachricht an Chat {chat_id}: {text[:50]}...")
-            
-            data = {
-                "chat_id": chat_id,
-                "text": text
-            }
-
-            if parse_mode:
-                data["parse_mode"] = parse_mode
-
-            if reply_markup:
-                data["reply_markup"] = reply_markup
-
-            response = self.session.post(
-                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-                json=data
-            )
-            
-            if response.status_code != 200:
-                print(f"FEHLER beim Senden der Nachricht: {response.status_code}")
-                print(response.text)
-                self.logger.error(f"Fehler beim Senden der Nachricht: {response.status_code} - {response.text}")
-                return False
-                
-            print(f"Nachricht erfolgreich gesendet: Status {response.status_code}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Fehler beim Senden der Nachricht: {str(e)}")
-            print(f"FEHLER beim Senden der Nachricht: {str(e)}")
-            return False
-            
-    def _process_command(self, chat_id, command_text):
-        """Verarbeitet einen Befehl"""
-        # Befehl und Parameter extrahieren
-        parts = command_text.split(maxsplit=1)
-        command = parts[0][1:]  # Entferne das '/'
-        params = parts[1] if len(parts) > 1 else ""
-
-        print(f"\n{'='*40}")
-        print(f"BEFEHL: /{command} {params} von Chat {chat_id}")
-        print(f"{'='*40}\n")
-        
-        # Protokolliere Befehl für Debugging
-        with open("command_log.txt", "a") as f:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"{timestamp} - Chat {chat_id} - Befehl: /{command} {params}\n")
-
-        # Testbefehl für Logging-Prüfung
-        if command == "testlog":
-            print("TESTLOG: Direkter Print zur Konsole")
-            self.logger.debug("DEBUG Log-Test")
-            self.logger.info("INFO Log-Test")
-            self.logger.warning("WARNING Log-Test")
-            self.logger.error("ERROR Log-Test")
-            self.logger.critical("CRITICAL Log-Test")
-            self._send_direct_message(chat_id, "Log-Test wurde ausgeführt, prüfe deine SSH-Konsole")
-            return
-
-        # Standardbefehle verarbeiten
-        if command in self.commands:
-            try:
-                print(f"Führe benutzerdefinierten Befehl aus: {command}")
-                result = self.commands[command]({"chat_id": chat_id, "params": params})
-                response = result.get("message", f"Befehl '{command}' ausgeführt")
-                self._send_direct_message(chat_id, response)
-            except Exception as e:
-                print(f"FEHLER bei Befehl '{command}': {str(e)}")
-                self._send_direct_message(chat_id, f"Fehler beim Ausführen des Befehls '{command}': {str(e)}")
-        else:
-            print(f"Unbekannter Befehl: {command}")
-            self._send_direct_message(chat_id, f"Unbekannter Befehl: /{command}\nVerwende /help für verfügbare Befehle.")
-
-    # Hier würden die weiteren Methoden folgen wie _handle_start_bot, _handle_stop_bot usw.
-    # (Ich habe diese Methoden weggelassen, da sie bereits im ursprünglichen Code vorhanden waren und keine Änderungen benötigen)
+        self.logger.info("=== TELEGRAM BOT INITIALISIERUNG ABGESCHLOSSEN ===")
     
-    def stop(self):
-        """Stoppt den Telegram-Bot."""
-        if not self.is_running:
-            self.logger.warning("Telegram-Bot läuft nicht")
-            return True
-
+    def _register_handlers(self):
+        """Registriert alle Handler für den Bot"""
+        self.logger.info("Registriere Telegram-Handler...")
+        
+        # Befehle
+        self.application.add_handler(CommandHandler("start", self._log_and_handle_start))
+        self.application.add_handler(CommandHandler("help", self._log_and_handle_help))
+        self.application.add_handler(CommandHandler("status", self._log_and_handle_status))
+        self.application.add_handler(CommandHandler("settings", self._log_and_handle_settings))
+        
+        # Button-Callbacks
+        self.application.add_handler(CallbackQueryHandler(self._log_and_handle_button))
+        
+        # Textnachrichten
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, self._log_and_handle_message
+        ))
+        
+        # Fehlerhandler
+        self.application.add_error_handler(self._handle_error)
+        
+        self.logger.info("Alle Handler erfolgreich registriert")
+    
+    def _log_user_action(self, update: Update, action_type: str, details: Dict[str, Any] = None):
+        """
+        Erstellt einen detaillierten Log-Eintrag für eine Benutzeraktion.
+        
+        Args:
+            update: Das Update-Objekt von Telegram
+            action_type: Art der Aktion (Befehl, Button, etc.)
+            details: Zusätzliche Details zur Aktion
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+        
+        # Basisinformationen
+        log_data = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "action": action_type,
+            "user_id": user.id if user else "Unbekannt",
+            "username": user.username if user else "Unbekannt",
+            "first_name": user.first_name if user else "Unbekannt",
+            "chat_id": chat.id if chat else "Unbekannt",
+            "chat_type": chat.type if chat else "Unbekannt",
+        }
+        
+        # Zusätzliche Details hinzufügen
+        if details:
+            log_data.update(details)
+        
+        # Log formatieren
+        log_msg = f"[{log_data['timestamp']}] {action_type.upper()} | "
+        log_msg += f"Benutzer: {log_data['user_id']} (@{log_data['username']}) | "
+        log_msg += f"Chat: {log_data['chat_id']} ({log_data['chat_type']})"
+        
+        # Details ausgeben
+        if details:
+            log_msg += " | Details: " + " | ".join(f"{k}={v}" for k, v in details.items())
+        
+        # Log ausgeben mit visueller Trennung je nach Aktionstyp
+        if action_type == "button":
+            self.logger.info(f"🔘 {log_msg}")
+        elif action_type == "command":
+            self.logger.info(f"🔹 {log_msg}")
+        elif action_type == "message":
+            self.logger.info(f"💬 {log_msg}")
+        elif action_type == "error":
+            self.logger.error(f"❌ {log_msg}")
+        else:
+            self.logger.info(f"ℹ️ {log_msg}")
+        
+        return log_data
+    
+    async def _log_and_handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Protokolliert und verarbeitet den /start Befehl"""
+        self._log_user_action(update, "command", {"command": "/start"})
+        
+        # Haupt-Menü anzeigen
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Portfolio", callback_data="portfolio"),
+                InlineKeyboardButton("💰 Handeln", callback_data="trade")
+            ],
+            [
+                InlineKeyboardButton("⚙️ Einstellungen", callback_data="settings"),
+                InlineKeyboardButton("📈 Status", callback_data="status")
+            ],
+            [
+                InlineKeyboardButton("📰 News", callback_data="news"),
+                InlineKeyboardButton("🔍 Info", callback_data="info")
+            ]
+        ]
+        
         try:
-            self.is_running = False
-            self.logger.info("Telegram-Bot wird gestoppt...")
-            print("Stoppe Telegram-Bot...")
-            
-            # Warten, bis der Thread beendet ist
-            if self.bot_thread and self.bot_thread.is_alive():
-                self.bot_thread.join(timeout=10)
-                
-            self.logger.info("Telegram-Bot erfolgreich gestoppt")
-            print("Telegram-Bot gestoppt")
-            return True
+            await update.message.reply_text(
+                "Willkommen beim Trading Bot! Wähle eine Option:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            self.logger.debug(f"Start-Menü an Benutzer {update.effective_user.id} gesendet")
         except Exception as e:
-            self.logger.error(f"Fehler beim Stoppen des Telegram-Bots: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            print(f"FEHLER beim Stoppen des Telegram-Bots: {str(e)}")
-            return False
-
-    def _start_status_update_timer(self):
-        """Startet einen Timer für regelmäßige Statusupdates."""
-        def send_periodic_updates():
-            while self.is_running:
-                try:
-                    # Status vom MainController abrufen
-                    if self.main_controller:
-                        status = self.main_controller.get_status()
-                        # Status an alle Benutzer senden
-                        self._send_status_summary_to_all_users(status)
-                except Exception as e:
-                    self.logger.error(f"Fehler beim Senden des Status-Updates: {str(e)}")
-                
-                # Warten bis zum nächsten Update
-                time.sleep(self.status_update_interval)
-                
-        # Timer-Thread starten
-        threading.Thread(target=send_periodic_updates, daemon=True).start()
-        self.logger.info(f"Status-Update-Timer gestartet (Intervall: {self.status_update_interval}s)")
-             self.logger.info("Callback-Query (Button-Druck) erkannt")
-                callback_query = update["callback_query"]
-                chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
-                user_id = callback_query.get("from", {}).get("id")
-                callback_data = callback_query.get("data")
-                message_id = callback_query.get("message", {}).get("message_id")
-                
-                print(f"BUTTON GEDRÜCKT: Data='{callback_data}', Chat-ID={chat_id}, User-ID={user_id}, Message-ID={message_id}")
-                self.logger.info(f"BUTTON GEDRÜCKT: {callback_data}")
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "start_command",
+                "details": traceback.format_exc()
+            })
+    
+    async def _log_and_handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Protokolliert und verarbeitet den /help Befehl"""
+        self._log_user_action(update, "command", {"command": "/help"})
+        
+        help_text = (
+            "📚 *Verfügbare Befehle:*\n"
+            "/start - Startet den Bot und zeigt das Hauptmenü\n"
+            "/help - Zeigt diese Hilfe an\n"
+            "/status - Zeigt den aktuellen Status\n"
+            "/settings - Zeigt Einstellungsoptionen\n\n"
+            "Du kannst auch die Buttons im Menü verwenden, um zu navigieren."
+        )
+        
+        try:
+            await update.message.reply_text(help_text, parse_mode="Markdown")
+            self.logger.debug(f"Hilfe-Text an Benutzer {update.effective_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "help_command"
+            })
+    
+    async def _log_and_handle_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Protokolliert und verarbeitet den /status Befehl"""
+        self._log_user_action(update, "command", {"command": "/status"})
+        
+        # Hier könnte man Statusinformationen aus anderen Modulen einbinden
+        status_text = (
+            "🔄 *Aktueller Bot-Status:*\n"
+            "• Bot ist aktiv und läuft\n"
+            "• Verbunden mit Telegram API\n"
+            "• Server-Zeit: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n"
+            "• Version: 1.0.0\n"
+        )
+        
+        try:
+            await update.message.reply_text(status_text, parse_mode="Markdown")
+            self.logger.debug(f"Status-Text an Benutzer {update.effective_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "status_command"
+            })
+    
+    async def _log_and_handle_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Protokolliert und verarbeitet den /settings Befehl"""
+        self._log_user_action(update, "command", {"command": "/settings"})
+        
+        # Einstellungs-Menü anzeigen
+        keyboard = [
+            [
+                InlineKeyboardButton("🔔 Benachrichtigungen", callback_data="settings_notifications"),
+                InlineKeyboardButton("💲 Währungen", callback_data="settings_currencies")
+            ],
+            [
+                InlineKeyboardButton("🔐 Sicherheit", callback_data="settings_security"),
+                InlineKeyboardButton("⏱️ Zeitrahmen", callback_data="settings_timeframes")
+            ],
+            [
+                InlineKeyboardButton("🔙 Zurück zum Hauptmenü", callback_data="back_to_main")
+            ]
+        ]
+        
+        try:
+            await update.message.reply_text(
+                "⚙️ *Einstellungen:*\n"
+                "Wähle eine Kategorie, um Einstellungen anzupassen.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"Einstellungs-Menü an Benutzer {update.effective_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "settings_command"
+            })
+    
+    async def _log_and_handle_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Protokolliert und verarbeitet Button-Klicks"""
+        query = update.callback_query
+        
+        # Detailliertes Logging
+        self._log_user_action(update, "button", {
+            "callback_data": query.data,
+            "message_id": query.message.message_id
+        })
+        
+        try:
+            # Bestätige den Button-Klick gegenüber Telegram
+            await query.answer()
+            self.logger.debug(f"Button-Klick bestätigt: {query.data}")
+            
+            # Verarbeitung der verschiedenen Button-Aktionen
+            if query.data == "portfolio":
+                await self._handle_portfolio_button(update, context)
+            elif query.data == "trade":
+                await self._handle_trade_button(update, context)
+            elif query.data == "settings":
+                await self._handle_settings_button(update, context)
+            elif query.data == "status":
+                await self._handle_status_button(update, context)
+            elif query.data == "news":
+                await self._handle_news_button(update, context)
+            elif query.data == "info":
+                await self._handle_info_button(update, context)
+            elif query.data == "back_to_main":
+                await self._handle_back_to_main_button(update, context)
+            elif query.data.startswith("settings_"):
+                await self._handle_settings_subcategory(update, context, query.data)
+            else:
+                # Für unbekannte Button-Daten
+                self.logger.warning(f"Unbehandelte Button-Daten: {query.data}")
+                # Benutzerdefinierten Handler aufrufen, falls registriert
+                if query.data in self.button_handlers:
+                    handler_func = self.button_handlers[query.data]
+                    await handler_func(update, context)
+        
+        except Exception as e:
+            error_details = {
+                "error": str(e),
+                "location": "button_handler",
+                "callback_data": query.data,
+                "traceback": traceback.format_exc()
+            }
+            self._log_user_action(update, "error", error_details)
+            
+            try:
+                # Informiere den Benutzer über den Fehler
+                await query.message.reply_text(
+                    "❌ Bei der Verarbeitung deiner Anfrage ist ein Fehler aufgetreten. "
+                    "Bitte versuche es später erneut."
+                )
+            except:
+                pass  # Wenn selbst die Fehlermeldung nicht gesendet werden kann
+    
+    async def _log_and_handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Protokolliert und verarbeitet Textnachrichten"""
+        self._log_user_action(update, "message", {"text": update.message.text})
+        
+        # Hier könnte eine Verarbeitung von Textnachrichten implementiert werden
+        # Zum Beispiel eine einfache Antwort
+        try:
+            await update.message.reply_text(
+                "Ich verstehe nur Befehle und Buttons. Versuche /help für eine Liste von Befehlen."
+            )
+            self.logger.debug(f"Standardantwort auf Textnachricht an Benutzer {update.effective_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "message_handler"
+            })
+    
+    async def _handle_portfolio_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Verarbeitet den Portfolio-Button"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite Portfolio-Button für Benutzer {query.from_user.id}")
+        
+        # Hier würde man Portfoliodaten aus anderen Modulen abrufen
+        portfolio_text = (
+            "📊 *Dein Portfolio:*\n\n"
+            "• BTC: 0.05 BTC (1,500.00 EUR)\n"
+            "• ETH: 0.5 ETH (750.00 EUR)\n"
+            "• SOL: 10 SOL (500.00 EUR)\n\n"
+            "Gesamtwert: 2,750.00 EUR\n"
+            "24h Änderung: +3.5%"
+        )
+        
+        try:
+            # Zurück-Button
+            keyboard = [[InlineKeyboardButton("🔙 Zurück", callback_data="back_to_main")]]
+            
+            await query.message.edit_text(
+                portfolio_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"Portfolio-Daten an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "portfolio_button_handler"
+            })
+    
+    async def _handle_trade_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Verarbeitet den Handels-Button"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite Trade-Button für Benutzer {query.from_user.id}")
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🟢 Kaufen", callback_data="trade_buy"),
+                InlineKeyboardButton("🔴 Verkaufen", callback_data="trade_sell")
+            ],
+            [InlineKeyboardButton("🔙 Zurück", callback_data="back_to_main")]
+        ]
+        
+        try:
+            await query.message.edit_text(
+                "💰 *Handelsoptionen:*\n"
+                "Wähle eine Aktion aus:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"Handelsoptionen an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "trade_button_handler"
+            })
+    
+    async def _handle_settings_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Verarbeitet den Einstellungs-Button"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite Settings-Button für Benutzer {query.from_user.id}")
+        
+        # Gleicher Inhalt wie bei /settings Befehl
+        keyboard = [
+            [
+                InlineKeyboardButton("🔔 Benachrichtigungen", callback_data="settings_notifications"),
+                InlineKeyboardButton("💲 Währungen", callback_data="settings_currencies")
+            ],
+            [
+                InlineKeyboardButton("🔐 Sicherheit", callback_data="settings_security"),
+                InlineKeyboardButton("⏱️ Zeitrahmen", callback_data="settings_timeframes")
+            ],
+            [
+                InlineKeyboardButton("🔙 Zurück zum Hauptmenü", callback_data="back_to_main")
+            ]
+        ]
+        
+        try:
+            await query.message.edit_text(
+                "⚙️ *Einstellungen:*\n"
+                "Wähle eine Kategorie, um Einstellungen anzupassen.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"Einstellungs-Menü an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "settings_button_handler"
+            })
+    
+    async def _handle_status_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Verarbeitet den Status-Button"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite Status-Button für Benutzer {query.from_user.id}")
+        
+        # Ähnlicher Inhalt wie beim /status Befehl
+        status_text = (
+            "🔄 *Aktueller Bot-Status:*\n\n"
+            "• Bot ist aktiv und läuft\n"
+            "• Verbunden mit Telegram API\n"
+            "• Server-Zeit: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n"
+            "• Version: 1.0.0\n\n"
+            "🖥️ *Server-Status:*\n"
+            "• CPU: 25%\n"
+            "• RAM: 512MB/2GB\n"
+            "• Laufzeit: 3d 12h 45m\n"
+        )
+        
+        keyboard = [[InlineKeyboardButton("🔙 Zurück", callback_data="back_to_main")]]
+        
+        try:
+            await query.message.edit_text(
+                status_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"Status-Information an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "status_button_handler"
+            })
+    
+    async def _handle_news_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Verarbeitet den News-Button"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite News-Button für Benutzer {query.from_user.id}")
+        
+        news_text = (
+            "📰 *Aktuelle Krypto-News:*\n\n"
+            "1. Bitcoin durchbricht wichtige Widerstandszone\n"
+            "2. Neue Regulierungen in der EU angekündigt\n"
+            "3. Ethereum-Entwickler planen Update für Q2\n"
+            "4. Großer Fonds investiert in Solana-Ökosystem\n\n"
+            "Letzte Aktualisierung: " + datetime.now().strftime("%H:%M:%S")
+        )
+        
+        keyboard = [[InlineKeyboardButton("🔙 Zurück", callback_data="back_to_main")]]
+        
+        try:
+            await query.message.edit_text(
+                news_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"News-Information an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "news_button_handler"
+            })
+    
+    async def _handle_info_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Verarbeitet den Info-Button"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite Info-Button für Benutzer {query.from_user.id}")
+        
+        info_text = (
+            "🔍 *Bot-Informationen:*\n\n"
+            "Dieser Trading-Bot wurde entwickelt, um den Handel mit Kryptowährungen "
+            "zu automatisieren und zu vereinfachen.\n\n"
+            "Version: 1.0.0\n"
+            "Entwickler: Trading Bot Team\n"
+            "Kontakt: support@example.com"
+        )
+        
+        keyboard = [[InlineKeyboardButton("🔙 Zurück", callback_data="back_to_main")]]
+        
+        try:
+            await query.message.edit_text(
+                info_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"Info-Text an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "info_button_handler"
+            })
+    
+    async def _handle_back_to_main_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Verarbeitet den Zurück-zum-Hauptmenü-Button"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite Back-to-Main-Button für Benutzer {query.from_user.id}")
+        
+        # Hauptmenü erneut anzeigen
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Portfolio", callback_data="portfolio"),
+                InlineKeyboardButton("💰 Handeln", callback_data="trade")
+            ],
+            [
+                InlineKeyboardButton("⚙️ Einstellungen", callback_data="settings"),
+                InlineKeyboardButton("📈 Status", callback_data="status")
+            ],
+            [
+                InlineKeyboardButton("📰 News", callback_data="news"),
+                InlineKeyboardButton("🔍 Info", callback_data="info")
+            ]
+        ]
+        
+        try:
+            await query.message.edit_text(
+                "Hauptmenü des Trading Bots. Wähle eine Option:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            self.logger.debug(f"Hauptmenü an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "back_to_main_button_handler"
+            })
+    
+    async def _handle_settings_subcategory(self, update: Update, context: ContextTypes.DEFAULT_TYPE, subcategory: str):
+        """Verarbeitet Einstellungs-Unterkategorien"""
+        query = update.callback_query
+        self.logger.info(f"Verarbeite Settings-Subkategorie {subcategory} für Benutzer {query.from_user.id}")
+        
+        # Je nach Unterkategorie unterschiedliche Inhalte anzeigen
+        if subcategory == "settings_notifications":
+            text = "🔔 *Benachrichtigungseinstellungen:*\n\nHier können Sie Ihre Benachrichtigungspräferenzen anpassen."
+        elif subcategory == "settings_currencies":
+            text = "💲 *Währungseinstellungen:*\n\nHier können Sie die zu überwachenden Währungen anpassen."
+        elif subcategory == "settings_security":
+            text = "🔐 *Sicherheitseinstellungen:*\n\nHier können Sie Sicherheitsoptionen konfigurieren."
+        elif subcategory == "settings_timeframes":
+            text = "⏱️ *Zeitrahmeneinstellungen:*\n\nHier können Sie die Analyse-Zeitrahmen anpassen."
+        else:
+            text = "⚙️ Einstellungen"
+        
+        # Zurück zu Einstellungen Button
+        keyboard = [[InlineKeyboardButton("🔙 Zurück zu Einstellungen", callback_data="settings")]]
+        
+        try:
+            await query.message.edit_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+            self.logger.debug(f"Einstellungs-Unterkategorie {subcategory} an Benutzer {query.from_user.id} gesendet")
+        except Exception as e:
+            self._log_user_action(update, "error", {
+                "error": str(e),
+                "location": "settings_subcategory_handler",
+                "subcategory": subcategory
+            })
+    
+    async def _handle_error(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Behandelt Fehler im Bot"""
+        if update:
+            chat_id = update.effective_chat.id if update.effective_chat else "Unbekannt"
+            user_id = update.effective_user.id if update.effective_user else "Unbekannt"
+        else:
+            chat_id = "Unbekannt"
+            user_id = "Unbekannt"
+        
+        error_msg = f"Fehler beim Update: Chat {chat_id}, Benutzer {user_id}"
+        if context.error:
+            error_msg += f", Fehler: {context.error}"
+        
+        self.logger.error(f"❌ {error_msg}")
+        self.logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Optional: Benachrichtige Admins über Fehler
+        for admin_id in self.admin_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"⚠️ *Bot-Fehler*\n\n{error_msg}\n\nZeitstempel: {datetime.now()}",
+                    parse_mode="Markdown"
+                )
+            except:
+                self.logger.error(f"Konnte Admin {admin_id} nicht über Fehler informieren")
+    
+    def register_command_handler(self, command: str, handler_func: Callable):
+        """
+        Registriert eine benutzerdefinierte Handler-Funktion für einen Befehl.
+        
+        Args:
+            command: Befehl ohne / (z.B. 'mycommand')
+            handler_func: Async-Funktion, die den Befehl verarbeitet
+        """
+        self.logger.info(f"Registriere benutzerdefinierten Handler für Befehl /{command}")
+        self.command_handlers[command] = handler_func
+        self.application.add_handler(CommandHandler(command, handler_func))
+    
+    def register_button_handler(self, callback_data: str, handler_func: Callable):
+        """
+        Registriert eine benutzerdefinierte Handler-Funktion für einen Button.
+        
+        Args:
+            callback_data: Callback-Daten des Buttons
+            handler_func: Async-Funktion, die den Button-Klick verarbeitet
+        """
+        self.logger.info(f"Registriere benutzerdefinierten Handler für Button {callback_data}")
+        self.button_handlers[callback_data] = handler_func
+    
+    def run(self, webhook_url: str = None):
+        """
+        Startet den Bot entweder im Polling-Modus oder im Webhook-Modus.
+        
+        Args:
+            webhook_url: URL für Webhook, falls Webhook-Modus verwendet werden soll
+        """
+        if webhook_url:
+            self.logger.info(f"Starte Bot im Webhook-Modus mit URL: {webhook_url}")
+            domain = webhook_url.split("://")[1].split("/")[0]
+            self.application.run_webhook(
+                listen="0.0.0.0",
+                port=8443,
+                url_path=webhook_url.split(domain)[1],
+                webhook_url=webhook_url
+            )
+        else:
+            self.logger.info("Starte Bot im Polling-Modus")
+            self.application.run_polling()
