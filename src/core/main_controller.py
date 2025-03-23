@@ -258,8 +258,8 @@ def start(self, mode: str = None, auto_trade: bool = True):
             self.logger.warning("Live Trading nicht bereit, Trading wird deaktiviert")
             self.module_status['live_trading']['status'] = "disabled"
     else:
-        self.logger.info("Automatisches Trading deaktiviert")
-        self.module_status['live_trading']['status'] = "disabled"
+            self.logger.info("Automatisches Trading deaktiviert")
+            self.module_status['live_trading']['status'] = "disabled"
             
             # Hauptüberwachungs-Thread starten
             self.running = True
