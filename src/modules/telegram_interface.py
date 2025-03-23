@@ -14,7 +14,7 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Updater, CommandHandler, CallbackQueryHandler, MessageHandler,
-    Filters, CallbackContext, ConversationHandler
+    filters, CallbackContext, ConversationHandler
 )
 
 class TelegramInterface:
@@ -302,6 +302,7 @@ class TelegramInterface:
             welcome_text,
             reply_markup=reply_markup
         )
+    
     def _cmd_help(self, update: Update, context: CallbackContext):
         """Zeigt Hilfetext mit allen verfügbaren Befehlen."""
         user_id = update.effective_user.id
@@ -395,14 +396,11 @@ class TelegramInterface:
             # Antwort-Text erstellen
             status_text = (
                 f"{status_emoji} <b>Bot-Status: {status.get('state', 'unknown').upper()}</b>\n\n"
-                
                 f"<b>Trading:</b> {'Aktiv' if trading_active else 'Inaktiv'}\n"
                 f"<b>Modus:</b> {trading_mode}\n"
                 f"<b>Laufzeit:</b> {status.get('uptime', '0:00:00')}\n"
                 f"<b>Letzte Aktivität:</b> {status.get('last_activity', 'Keine')}\n\n"
-                
                 f"<b>Module:</b>\n{modules_status}\n\n"
-                
                 f"<b>Ereignisse:</b>\n"
                 f"- Trades heute: {status.get('trades_today', 0)}\n"
                 f"- Fehler heute: {status.get('errors_today', 0)}\n"
@@ -785,7 +783,7 @@ class TelegramInterface:
         except Exception as e:
             self.logger.error(f"Fehler beim Abrufen der Positionen: {str(e)}")
             message.edit_text(f"❌ Fehler: {str(e)}")
-
+    
     def _cmd_orders(self, update: Update, context: CallbackContext):
         """Zeigt offene Orders."""
         user_id = update.effective_user.id
@@ -862,14 +860,35 @@ class TelegramInterface:
     def _cmd_performance(self, update: Update, context: CallbackContext):
         """Zeigt Performance-Metriken."""
         # Implementierung hier...
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        update.message.reply_text("Diese Funktion wird in Kürze implementiert.")
     
     def _cmd_market(self, update: Update, context: CallbackContext):
         """Zeigt Marktanalyse-Daten."""
         # Implementierung hier...
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        update.message.reply_text("Diese Funktion wird in Kürze implementiert.")
     
     def _cmd_prediction(self, update: Update, context: CallbackContext):
         """Zeigt aktuelle Prognosen."""
         # Implementierung hier...
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        update.message.reply_text("Diese Funktion wird in Kürze implementiert.")
     
     def _show_main_menu(self, message):
         """Zeigt das Hauptmenü mit allen verfügbaren Optionen."""
