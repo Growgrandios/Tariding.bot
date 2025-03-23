@@ -30,7 +30,6 @@ def _run_bot(self):
         self.session = requests.Session()
         last_update_id = 0
         self.logger.info("Bot-Thread gestartet (HTTP-Polling-Modus)")
-        
         while self.is_running:
             try:
                 # Direkter API-Aufruf
@@ -44,18 +43,15 @@ def _run_bot(self):
                     timeout=35
                 )
                 response.raise_for_status()
-                
                 # Verarbeite Updates
                 data = response.json()
                 if data.get("ok") and data.get("result"):
                     for update in data["result"]:
                         last_update_id = update["update_id"]
                         self._handle_raw_update(update)
-                
             except Exception as e:
                 self.logger.error(f"Polling-Fehler: {str(e)}")
                 time.sleep(5)
-                
     except Exception as e:
         self.logger.error(f"Kritischer Bot-Fehler: {str(e)}")
         self.logger.error(traceback.format_exc())
