@@ -21,105 +21,85 @@ import os
 os.environ['PYTHONUNBUFFERED'] = '1'  # Deaktiviert Signalhandling im Thread
 
 # Innerhalb der TelegramInterface-Klasse:
+# In telegram_interface.py
+
 def _run_bot(self):
-    """Führt den Telegram-Bot im Hintergrund aus, ohne Signal-Handler zu verwenden."""
+    """Führt den Telegram-Bot komplett ohne asyncio und Signal-Handler aus"""
     try:
-        # Eigenen Event-Loop erstellen
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        import requests
+        self.session = requests.Session()
+        last_update_id = 0
+        self.logger.info("Bot-Thread gestartet (HTTP-Polling-Modus)")
         
-        # Eigene Polling-Funktion ohne Signal-Handler
-        async def custom_polling():
-            # Bot initialisieren ohne run_polling
-            await self.application.initialize()
-            
-            # Manuelles Polling
-            offset = 0
-            while True:
-                try:
-                    # Direkt updates abrufen
-                    updates = await self.application.bot.get_updates(
-                        offset=offset,
-                        timeout=30,
-                        allowed_updates=Update.ALL_TYPES
-                    )
-                    
-                    # Updates manuell verarbeiten
-                    for update in updates:
-                        offset = update.update_id + 1
-                        await self.application.process_update(update)
-                        
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    self.logger.error(f"Fehler beim Polling: {str(e)}")
-                    await asyncio.sleep(1)
-        
-        # Eigene Polling-Funktion starten
-        self.loop.run_until_complete(custom_polling())
+        while self.is_running:
+            try:
+                # Direkter API-Aufruf
+                response = self.session.get(
+                    f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
+                    params={
+                        "offset": last_update_id + 1,
+                        "timeout": 30,
+                        "allowed_updates": ["message", "callback_query"]
+                    },
+                    timeout=35
+                )
+                response.raise_for_status()
+                
+                # Verarbeite Updates
+                data = response.json()
+                if data.get("ok") and data.get("result"):
+                    for update in data["result"]:
+                        last_update_id = update["update_id"]
+                        self._handle_raw_update(update)
+                
+            except Exception as e:
+                self.logger.error(f"Polling-Fehler: {str(e)}")
+                time.sleep(5)
+                
     except Exception as e:
-        self.logger.error(f"Fehler im Bot-Thread: {str(e)}")
+        self.logger.error(f"Kritischer Bot-Fehler: {str(e)}")
         self.logger.error(traceback.format_exc())
     finally:
         self.logger.info("Bot-Thread beendet")
         self.is_running = False
 
-def _handle_update_via_api(self, update):
-    """Verarbeitet ein Update manuell über die Telegram API."""
+def _handle_raw_update(self, update):
+    """Verarbeitet Roh-Updates der Telegram API"""
     try:
-        # Zugrundeliegende Daten extrahieren
-        message = update.get("message")
-        
-        if not message:
-            return
-            
+        message = update.get("message", {})
         chat_id = message.get("chat", {}).get("id")
-        text = message.get("text", "")
         user_id = message.get("from", {}).get("id")
+        text = message.get("text", "")
         
-        # Autorisierungsprüfung
+        # Autorisierung prüfen
         if self.allowed_users and user_id not in self.allowed_users:
-            self.logger.warning(f"Nicht autorisierter Zugriff von User-ID {user_id}")
             return
             
         # Befehle verarbeiten
-        if text and text.startswith("/"):
+        if text.startswith("/"):
             command = text.split()[0].lower()
-            
-            # Standard-Befehle
             if command == "/start":
-                self._send_message(chat_id, "Bot gestartet! Verwende /help für Hilfe.")
+                self._send_direct_message(chat_id, "🤖 Bot aktiv! Nutze /help für Befehle")
             elif command == "/help":
-                self._send_message(chat_id, "Verfügbare Befehle: /start, /help, /status")
-            elif command == "/status":
-                if self.main_controller:
-                    status = self.main_controller.get_status()
-                    self._send_message(chat_id, f"Status: {status}")
-                else:
-                    self._send_message(chat_id, "Status nicht verfügbar.")
-            else:
-                self._send_message(chat_id, f"Unbekannter Befehl: {command}")
-    except Exception as e:
-        self.logger.error(f"Fehler bei der Verarbeitung eines Updates: {str(e)}")
-
-def _send_message(self, chat_id, text, parse_mode=None):
-    """Sendet eine Nachricht über die Telegram API."""
-    try:
-        params = {
-            "chat_id": chat_id,
-            "text": text
-        }
-        
-        if parse_mode:
-            params["parse_mode"] = parse_mode
+                self._send_direct_message(chat_id, "📋 Verfügbare Befehle:\n/status - Bot-Status\n/balance - Kontostand")
+            # Weitere Befehle hier ergänzen
             
+    except Exception as e:
+        self.logger.error(f"Update-Verarbeitungsfehler: {str(e)}")
+
+def _send_direct_message(self, chat_id, text):
+    """Sendet Nachricht direkt über die Telegram API"""
+    try:
         self.session.post(
             f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-            json=params
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "Markdown"
+            }
         )
-        return True
     except Exception as e:
-        self.logger.error(f"Fehler beim Senden einer Nachricht: {str(e)}")
-        return False
+        self.logger.error(f"Nachricht konnte nicht gesendet werden: {str(e)}")
         
         # Starte den minimalen Polling-Loop
         # HIER IST DIE WICHTIGE ÄNDERUNG:
