@@ -241,7 +241,7 @@ class DataPipeline:
         """Aktualisiert Kryptowährungsdaten."""
         symbols = [
             'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'XRP/USDT', 'ADA/USDT',
-            'SOL/USDT', 'DOGE/USDT', 'DOT/USDT', 'MATIC/USDT', 'LTC/USDT'
+            'SOL/USDT', 'DOGE/USDT', 'DOT/USDT', 'LTC/USDT'
         ]
         
         timeframes = ['1m', '5m', '15m', '1h', '4h', '1d']
