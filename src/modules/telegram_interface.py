@@ -20,6 +20,7 @@ from PIL import Image
 import os
 os.environ['PYTHONUNBUFFERED'] = '1'  # Deaktiviert Signalhandling im Thread
 
+# Innerhalb der TelegramInterface-Klasse:
 def _run_bot(self):
     """Führt den Telegram-Bot im Hintergrund aus."""
     try:
