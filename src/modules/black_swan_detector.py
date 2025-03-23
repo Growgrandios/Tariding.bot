@@ -89,14 +89,26 @@ class BlackSwanDetector:
         self.logger.info("BlackSwanDetector erfolgreich initialisiert")
     
     def set_data_pipeline(self, data_pipeline):
-        """
-        Setzt die Datenpipeline für den Zugriff auf Marktdaten.
-        
-        Args:
-            data_pipeline: Referenz zur Datenpipeline
-        """
-        self.data_pipeline = data_pipeline
-        self.logger.info("Datenpipeline erfolgreich verbunden")
+    """
+    Setzt die Datenpipeline für den Zugriff auf Marktdaten.
+    Args:
+        data_pipeline: Referenz zur Datenpipeline
+    """
+    self.data_pipeline = data_pipeline
+    self.logger.info("Datenpipeline erfolgreich verbunden")
+    
+    # Direkt testen, ob die Pipeline funktioniert
+    if self.data_pipeline:
+        try:
+            # Test der Verbindung mit einem einfachen Aufruf
+            test_symbol = "BTC/USDT"
+            test_data = self.data_pipeline.get_crypto_data(test_symbol, "1h", 1)
+            if test_data is not None:
+                self.logger.info(f"DataPipeline-Verbindung erfolgreich getestet: {test_symbol}")
+            else:
+                self.logger.warning(f"DataPipeline-Test hat keine Daten zurückgegeben: {test_symbol}")
+        except Exception as e:
+            self.logger.error(f"DataPipeline-Verbindungstest fehlgeschlagen: {str(e)}")
     
     def register_notification_callback(self, callback: Callable[[Dict[str, Any]], None]):
         """
