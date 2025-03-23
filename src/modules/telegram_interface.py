@@ -1,3 +1,5 @@
+# telegram_interface.py
+
 import os
 import logging
 import threading
@@ -27,11 +29,17 @@ class TelegramInterface:
         self.logger = logging.getLogger("TelegramInterface")
         self.logger.info("Initialisiere TelegramInterface...")
         
-        # Debug-Modus aktivieren
+        # Debug-Modus aktivieren - WICHTIG für Fehlerbehebung
         self.debug_mode = config.get('debug_mode', True)
         if self.debug_mode:
             logging.getLogger("TelegramInterface").setLevel(logging.DEBUG)
             self.logger.info("Debug-Modus aktiviert - alle Button-Aktionen werden protokolliert")
+            
+            # Konsolenausgabe konfigurieren für bessere Sichtbarkeit
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            logging.getLogger("TelegramInterface").addHandler(console_handler)
         
         # API-Konfiguration
         self.bot_token = config.get('bot_token', os.getenv('TELEGRAM_BOT_TOKEN', ''))
@@ -191,7 +199,8 @@ class TelegramInterface:
         """Verarbeitet ein Telegram-Update mit ausführlichem Debugging"""
         try:
             # Ausführliches Debugging - Zeige das vollständige Update in der Konsole
-            self.logger.info(f"Empfangenes Update: {json.dumps(update, indent=2)}")
+            print(f"TELEGRAM UPDATE EMPFANGEN: {json.dumps(update, indent=2)}")
+            self.logger.critical(f"Update-ID: {update.get('update_id')} - Typ: {'callback_query' if 'callback_query' in update else 'message'}")
             
             # Chat_id und Text extrahieren - abhängig vom Update-Typ
             chat_id = None
@@ -216,7 +225,8 @@ class TelegramInterface:
                 callback_data = callback_query.get("data")
                 message_id = callback_query.get("message", {}).get("message_id")
                 
-                self.logger.info(f"BUTTON GEDRÜCKT: {callback_data}")
+                print(f"BUTTON GEDRÜCKT: {callback_data}")
+                self.logger.critical(f"BUTTON GEDRÜCKT: {callback_data}")
                 self.logger.info(f"Chat ID: {chat_id}, User ID: {user_id}")
             
             # Autorisierung prüfen
@@ -227,13 +237,22 @@ class TelegramInterface:
             # Callback-Query beantworten (WICHTIG für Buttons)
             if "callback_query" in update:
                 try:
-                    self.logger.info(f"Beantworte Callback-Query mit ID: {update['callback_query']['id']}")
+                    callback_id = update["callback_query"]["id"]
+                    print(f"BUTTON GEDRÜCKT - CALLBACK ID: {callback_id}")
+                    self.logger.critical(f"Beantworte Callback: {callback_id}")
+                    
+                    # Antwort an Telegram senden (wichtig!)
                     response = self.session.post(
                         f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
-                        json={"callback_query_id": update["callback_query"]["id"]}
+                        json={"callback_query_id": callback_id}
                     )
+                    print(f"TELEGRAM ANTWORT: {response.status_code} - {response.text}")
                     self.logger.info(f"Antwort von Telegram: {response.status_code}, {response.text}")
+                    
+                    # Kurze Verzögerung für bessere Verarbeitung
+                    time.sleep(0.3)
                 except Exception as e:
+                    print(f"CALLBACK-FEHLER: {str(e)}")
                     self.logger.error(f"Fehler beim Beantworten der Callback-Query: {str(e)}")
             
             # Callback-Anfragen verarbeiten
@@ -291,6 +310,17 @@ class TelegramInterface:
                 self._execute_close_all_positions(chat_id)
             elif callback_data == "cancel_close_all":
                 self._send_direct_message(chat_id, "Abgebrochen. Keine Positionen wurden geschlossen.")
+            elif callback_data.startswith("train_model:"):
+                parts = callback_data.split(":")
+                if len(parts) >= 3:
+                    symbol = parts[1]
+                    timeframe = parts[2]
+                    self._handle_train_model(chat_id, symbol, timeframe)
+            elif callback_data.startswith("analyze_news:"):
+                asset = callback_data.split(":")[1]
+                self._handle_analyze_news(chat_id, asset)
+            elif callback_data.startswith("optimize_portfolio"):
+                self._handle_optimize_portfolio(chat_id)
             else:
                 self._send_direct_message(chat_id, f"Unbekannte Aktion: {callback_data}")
         except Exception as e:
@@ -305,6 +335,17 @@ class TelegramInterface:
         command = parts[0][1:]  # Entferne das '/'
         params = parts[1] if len(parts) > 1 else ""
         
+        # Testbefehl für Logging-Prüfung
+        if command == "testlog":
+            print("TESTLOG: Direkter Print zur Konsole")
+            self.logger.debug("DEBUG Log-Test")
+            self.logger.info("INFO Log-Test")
+            self.logger.warning("WARNING Log-Test")
+            self.logger.error("ERROR Log-Test")
+            self.logger.critical("CRITICAL Log-Test")
+            self._send_direct_message(chat_id, "Log-Test wurde ausgeführt, prüfe deine SSH-Konsole")
+            return
+        
         # Standard-Befehle
         if command == "start":
             self._send_direct_message(chat_id, "🤖 Bot aktiv! Nutze /help für Befehle")
@@ -316,6 +357,7 @@ Grundlegende Befehle:
 /start - Startet den Bot und zeigt das Willkommensmenü
 /help - Zeigt diese Hilfe an
 /status - Zeigt den aktuellen Status des Trading Bots
+/testlog - Testet die Logging-Funktionalität (zur Fehlerbehebung)
 
 Trading-Steuerung:
 /startbot - Startet den Trading Bot
@@ -330,7 +372,6 @@ Trading-Informationen:
 
 Transkript-Verarbeitung:
 /processtranscript [Pfad] - Verarbeitet ein Transkript
-Du kannst auch direkt Transkriptdateien (.txt) senden
 
 Sonstige Funktionen:
 /dashboard - Zeigt ein interaktives Dashboard
@@ -734,6 +775,189 @@ Sonstige Funktionen:
             else:
                 error_msg = result.get('message', 'Unbekannter Fehler')
                 self._send_direct_message(chat_id, f"❌ Fehler: {error_msg}")
+        except Exception as e:
+            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
+    
+    def _handle_train_model(self, chat_id, symbol, timeframe):
+        """Startet das Training eines Modells für ein bestimmtes Symbol und Timeframe"""
+        if not self.main_controller or not hasattr(self.main_controller, 'learning_module'):
+            self._send_direct_message(chat_id, "Fehler: Learning-Modul nicht verfügbar")
+            return
+        
+        self._send_direct_message(chat_id, f"🧠 Starte Training für {symbol} ({timeframe})...\nDies kann einige Minuten dauern.")
+        
+        try:
+            # Trainingsauftrag im Hintergrund starten
+            def train_background():
+                try:
+                    result = self.main_controller.learning_module.train_model(symbol, timeframe)
+                    if result:
+                        self._send_direct_message(
+                            chat_id, 
+                            f"✅ Training für {symbol} ({timeframe}) erfolgreich abgeschlossen!"
+                        )
+                    else:
+                        self._send_direct_message(
+                            chat_id, 
+                            f"❌ Training für {symbol} ({timeframe}) fehlgeschlagen."
+                        )
+                except Exception as e:
+                    self._send_direct_message(
+                        chat_id, 
+                        f"❌ Fehler beim Training: {str(e)}"
+                    )
+            
+            # Training im Hintergrund ausführen
+            threading.Thread(target=train_background, daemon=True).start()
+            
+        except Exception as e:
+            self._send_direct_message(chat_id, f"❌ Fehler beim Starten des Trainings: {str(e)}")
+    
+    def _handle_analyze_news(self, chat_id, asset):
+        """Analysiert News für ein bestimmtes Asset"""
+        if not self.main_controller or not hasattr(self.main_controller, 'news_analyzer'):
+            self._send_direct_message(chat_id, "Fehler: News-Modul nicht verfügbar")
+            return
+        
+        self._send_direct_message(chat_id, f"📰 Analysiere News für {asset}...")
+        
+        try:
+            # Asset-News abrufen
+            news_summary = self.main_controller.news_analyzer.get_asset_news_summary(asset)
+            
+            # Nachricht erstellen
+            message = f"📰 News für {asset}\n\n"
+            
+            # Sentiment
+            sentiment = news_summary.get('sentiment', {})
+            sentiment_score = sentiment.get('sentiment_score', 0)
+            sentiment_label = sentiment.get('sentiment_label', 'NEUTRAL')
+            
+            # Emoji basierend auf Sentiment
+            sentiment_emoji = "🟢" if sentiment_score > 0.1 else "🔴" if sentiment_score < -0.1 else "⚪"
+            
+            message += f"**Sentiment:** {sentiment_emoji} {sentiment_label}\n"
+            message += f"Sentiment-Score: {sentiment_score:.2f}\n"
+            message += f"Analysierte News: {news_summary.get('news_count', 0)}\n\n"
+            
+            # Top-Themen
+            top_topics = news_summary.get('top_topics', [])
+            if top_topics:
+                message += "**Wichtigste Themen:**\n"
+                for topic in top_topics:
+                    topic_name = topic.capitalize().replace('_', ' ')
+                    message += f"• {topic_name}\n"
+                message += "\n"
+            
+            # Verwandte Assets
+            related_assets = news_summary.get('related_assets', [])
+            if related_assets:
+                message += "**Verwandte Assets:**\n"
+                message += f"{', '.join(related_assets)}\n\n"
+            
+            # Wichtige Artikel
+            important_articles = news_summary.get('important_articles', [])
+            if important_articles:
+                message += "**Wichtige Artikel:**\n"
+                for i, article in enumerate(important_articles[:3]):  # Top 3 Artikel
+                    title = article.get('title', 'Kein Titel')
+                    source = article.get('source', 'Unbekannt')
+                    sentiment = article.get('sentiment_score', 0)
+                    sentiment_emoji = "🟢" if sentiment > 0.1 else "🔴" if sentiment < -0.1 else "⚪"
+                    
+                    message += f"{i+1}. {sentiment_emoji} {title} ({source})\n"
+            
+            # Buttons für andere Assets und Aktionen
+            other_assets = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+            other_assets = [a for a in other_assets if a != asset]
+            
+            buttons = []
+            # Erste Reihe mit anderen Assets
+            button_row = []
+            for other_asset in other_assets[:3]:
+                button_row.append({
+                    "text": f"{other_asset} News",
+                    "callback_data": f"analyze_news:{other_asset}"
+                })
+            buttons.append(button_row)
+            
+            # Zweite Reihe mit weiteren Aktionen
+            buttons.append([
+                {"text": "📰 Alle News", "callback_data": "news"},
+                {"text": "📊 Dashboard", "callback_data": "dashboard"}
+            ])
+            
+            # Nachricht senden
+            self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
+            
+        except Exception as e:
+            self._send_direct_message(chat_id, f"❌ Fehler bei der News-Analyse für {asset}: {str(e)}")
+    
+    def _handle_optimize_portfolio(self, chat_id):
+        """Optimiert das Portfolio"""
+        if not self.main_controller or not hasattr(self.main_controller, 'portfolio_optimizer'):
+            self._send_direct_message(chat_id, "Fehler: Portfolio-Optimizer nicht verfügbar")
+            return
+        
+        self._send_direct_message(chat_id, "📊 Starte Portfolio-Optimierung...")
+        
+        try:
+            # Portfolio-Optimierung aufrufen
+            result = self.main_controller.optimize_portfolio()
+            
+            if result.get('status') == 'success':
+                optimization_data = result.get('data', {})
+                
+                # Nachricht erstellen
+                message = "📊 Portfolio-Optimierung\n\n"
+                
+                # Optimierte Allokation
+                allocation = optimization_data.get('allocation', {})
+                if allocation:
+                    message += "**Optimierte Allokation:**\n"
+                    for asset, weight in allocation.items():
+                        message += f"• {asset}: {weight*100:.1f}%\n"
+                    message += "\n"
+                
+                # Performance-Metriken
+                metrics = optimization_data.get('metrics', {})
+                if metrics:
+                    message += "**Performance-Metriken:**\n"
+                    message += f"Erwartete Rendite: {metrics.get('expected_return', 0)*100:.2f}%\n"
+                    message += f"Volatilität: {metrics.get('volatility', 0)*100:.2f}%\n"
+                    message += f"Sharpe Ratio: {metrics.get('sharpe_ratio', 0):.3f}\n\n"
+                
+                # Optimierungsparameter
+                params = optimization_data.get('parameters', {})
+                if params:
+                    message += "**Optimierungsparameter:**\n"
+                    message += f"Ziel: {params.get('objective', 'Sharpe Ratio')}\n"
+                    message += f"Risikotoleranz: {params.get('risk_tolerance', 'Medium')}\n"
+                
+                # Buttons für Aktionen
+                buttons = [
+                    [
+                        {"text": "🧮 Neue Optimierung", "callback_data": "optimize_portfolio"},
+                        {"text": "📊 Dashboard", "callback_data": "dashboard"}
+                    ],
+                    [
+                        {"text": "💰 Kontostand", "callback_data": "balance"},
+                        {"text": "📈 Performance", "callback_data": "performance"}
+                    ]
+                ]
+                
+                # Nachricht senden
+                self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
+                
+                # Wenn ein Chart erstellt wurde, dieses senden
+                chart_path = optimization_data.get('chart_path')
+                if chart_path and os.path.exists(chart_path):
+                    self._send_photo(chat_id, chart_path)
+                    # Datei nach dem Senden löschen
+                    os.remove(chart_path)
+            else:
+                error_msg = result.get('message', 'Unbekannter Fehler')
+                self._send_direct_message(chat_id, f"❌ Fehler bei der Portfolio-Optimierung: {error_msg}")
         except Exception as e:
             self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
     
