@@ -240,17 +240,16 @@ def start(self, mode: str = None, auto_trade: bool = True):
         self.data_pipeline.start_auto_updates()
         self.module_status['data_pipeline']['status'] = "running"
         
-        # WICHTIG: Sicherstellen, dass die Datenpipeline verbunden ist
-        # Diese Zeile erneut aufrufen, um die Verbindung zu garantieren
+        # Verbindung zwischen BlackSwanDetector und DataPipeline erneuern
         self.black_swan_detector.set_data_pipeline(self.data_pipeline)
         
         # Black Swan Detector starten
         self.black_swan_detector.start_monitoring()
         self.module_status['black_swan_detector']['status'] = "running"
-            
-            # Telegram-Bot starten
-            self.telegram_interface.start()
-            self.module_status['telegram_interface']['status'] = "running"
+
+        # Telegram-Bot starten (korrekte Einrückung verwenden!)
+        self.telegram_interface.start()
+        self.module_status['telegram_interface']['status'] = "running"
             
             # Live Trading starten (falls aktiviert)
             current_mode = mode or self.config.get('trading', {}).get('mode', 'paper')
