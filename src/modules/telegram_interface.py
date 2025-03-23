@@ -303,18 +303,13 @@ class TelegramInterface:
             welcome_text,
             reply_markup=reply_markup
         )
-        
-        update.message.reply_html(
-            welcome_text,
-            reply_markup=reply_markup
-        )
-    
-    def _cmd_help(self, update: Update, context: CallbackContext):
+
+    async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Zeigt Hilfetext mit allen verfügbaren Befehlen."""
         user_id = update.effective_user.id
         
         if not self._is_user_authorized(user_id):
-            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            await update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
             return
         
         help_text = (
@@ -353,7 +348,7 @@ class TelegramInterface:
         keyboard = [[InlineKeyboardButton("🔙 Zurück zum Menü", callback_data="menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        update.message.reply_html(
+        await update.message.reply_html(
             help_text,
             reply_markup=reply_markup
         )
