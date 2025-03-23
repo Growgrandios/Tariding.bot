@@ -28,12 +28,8 @@ def _run_bot(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         
-        # Minimale Implementierung ohne Signalhandler
-        async def minimal_polling_loop():
-            # Initialisiere Application
+        async def polling_loop():
             await self.application.initialize()
-            
-            # Endlosschleife für Updates
             offset = 0
             while True:
                 try:
@@ -44,22 +40,22 @@ def _run_bot(self):
                         allowed_updates=Update.ALL_TYPES
                     )
                     
-                    # Updates verarbeiten
+                    # Verarbeite jedes Update
                     for update in updates:
                         offset = update.update_id + 1
                         await self.application.process_update(update)
-                        
+                    
                     # Kurze Pause
                     await asyncio.sleep(0.1)
                         
                 except Exception as e:
-                    self.logger.error(f"Fehler beim Abrufen von Updates: {str(e)}")
-                    await asyncio.sleep(1)
+                    self.logger.error(f"Fehler beim Polling: {str(e)}")
+                    await asyncio.sleep(5)
+
+        self.loop.run_until_complete(polling_loop())
         
-        # Starte den minimalen Polling-Loop
-        self.loop.run_until_complete(minimal_polling_loop())
     except Exception as e:
-        self.logger.error(f"Fehler im Bot-Thread: {str(e)}")
+        self.logger.error(f"Kritischer Fehler im Bot-Thread: {str(e)}")
         self.logger.error(traceback.format_exc())
     finally:
         self.logger.info("Bot-Thread beendet")
