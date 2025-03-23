@@ -27,6 +27,12 @@ class TelegramInterface:
         self.logger = logging.getLogger("TelegramInterface")
         self.logger.info("Initialisiere TelegramInterface...")
         
+        # Debug-Modus aktivieren
+        self.debug_mode = config.get('debug_mode', True)
+        if self.debug_mode:
+            logging.getLogger("TelegramInterface").setLevel(logging.DEBUG)
+            self.logger.info("Debug-Modus aktiviert - alle Button-Aktionen werden protokolliert")
+        
         # API-Konfiguration
         self.bot_token = config.get('bot_token', os.getenv('TELEGRAM_BOT_TOKEN', ''))
         
@@ -182,8 +188,11 @@ class TelegramInterface:
             self.is_running = False
     
     def _handle_raw_update(self, update):
-        """Verarbeitet ein Telegram-Update"""
+        """Verarbeitet ein Telegram-Update mit ausführlichem Debugging"""
         try:
+            # Ausführliches Debugging - Zeige das vollständige Update in der Konsole
+            self.logger.info(f"Empfangenes Update: {json.dumps(update, indent=2)}")
+            
             # Chat_id und Text extrahieren - abhängig vom Update-Typ
             chat_id = None
             user_id = None
@@ -193,29 +202,49 @@ class TelegramInterface:
             
             # Prüfen ob Nachricht oder Callback-Query
             if "message" in update:
+                self.logger.info("Nachricht erkannt")
                 message = update["message"]
                 chat_id = message.get("chat", {}).get("id")
                 user_id = message.get("from", {}).get("id")
                 text = message.get("text", "")
                 message_id = message.get("message_id")
             elif "callback_query" in update:
+                self.logger.info("Callback-Query (Button-Druck) erkannt")
                 callback_query = update["callback_query"]
                 chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
                 user_id = callback_query.get("from", {}).get("id")
                 callback_data = callback_query.get("data")
                 message_id = callback_query.get("message", {}).get("message_id")
+                
+                self.logger.info(f"BUTTON GEDRÜCKT: {callback_data}")
+                self.logger.info(f"Chat ID: {chat_id}, User ID: {user_id}")
             
             # Autorisierung prüfen
             if not chat_id or not self._is_authorized(str(user_id)):
+                self.logger.warning(f"Nicht autorisierter Zugriff von User ID: {user_id}")
                 return
+            
+            # Callback-Query beantworten (WICHTIG für Buttons)
+            if "callback_query" in update:
+                try:
+                    self.logger.info(f"Beantworte Callback-Query mit ID: {update['callback_query']['id']}")
+                    response = self.session.post(
+                        f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
+                        json={"callback_query_id": update["callback_query"]["id"]}
+                    )
+                    self.logger.info(f"Antwort von Telegram: {response.status_code}, {response.text}")
+                except Exception as e:
+                    self.logger.error(f"Fehler beim Beantworten der Callback-Query: {str(e)}")
             
             # Callback-Anfragen verarbeiten
             if callback_data:
+                self.logger.info(f"Verarbeite Callback-Daten: {callback_data}")
                 self._handle_callback_data(chat_id, callback_data, message_id)
                 return
             
             # Textnachrichten verarbeiten
             if text:
+                self.logger.info(f"Verarbeite Text: {text}")
                 # Befehle verarbeiten (beginnen mit /)
                 if text.startswith("/"):
                     self._process_command(chat_id, text)
@@ -262,17 +291,6 @@ class TelegramInterface:
                 self._execute_close_all_positions(chat_id)
             elif callback_data == "cancel_close_all":
                 self._send_direct_message(chat_id, "Abgebrochen. Keine Positionen wurden geschlossen.")
-            elif callback_data.startswith("train_model:"):
-                parts = callback_data.split(":")
-                if len(parts) >= 3:
-                    symbol = parts[1]
-                    timeframe = parts[2]
-                    self._handle_train_model(chat_id, symbol, timeframe)
-            elif callback_data.startswith("analyze_news:"):
-                asset = callback_data.split(":")[1]
-                self._handle_analyze_news(chat_id, asset)
-            elif callback_data.startswith("optimize_portfolio"):
-                self._handle_optimize_portfolio(chat_id)
             else:
                 self._send_direct_message(chat_id, f"Unbekannte Aktion: {callback_data}")
         except Exception as e:
@@ -310,14 +328,9 @@ Trading-Informationen:
 /positions - Zeigt offene Positionen
 /performance - Zeigt Performance-Metriken
 
-Erweiterte Funktionen:
-/markets - Zeigt verfügbare Märkte und Symbole
-/train - Startet das Training des ML-Modells
-/news - Zeigt aktuelle Krypto-News
-/optimize - Optimiert das Portfolio
-
 Transkript-Verarbeitung:
 /processtranscript [Pfad] - Verarbeitet ein Transkript
+Du kannst auch direkt Transkriptdateien (.txt) senden
 
 Sonstige Funktionen:
 /dashboard - Zeigt ein interaktives Dashboard
@@ -344,14 +357,6 @@ Sonstige Funktionen:
             self._handle_performance(chat_id)
         elif command == "dashboard":
             self._send_dashboard(chat_id)
-        elif command == "markets":
-            self._handle_markets(chat_id)
-        elif command == "train":
-            self._handle_train_command(chat_id, params)
-        elif command == "news":
-            self._handle_news_command(chat_id, params)
-        elif command == "optimize":
-            self._handle_optimize_portfolio(chat_id)
         elif command == "processtranscript":
             if params:
                 self._handle_process_transcript(chat_id, params)
@@ -633,377 +638,6 @@ Sonstige Funktionen:
             else:
                 error_msg = result.get('message', 'Unbekannter Fehler')
                 self._send_direct_message(chat_id, f"❌ Fehler: {error_msg}")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_markets(self, chat_id):
-        """Zeigt verfügbare Märkte und Handelssymbole"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Rufe verfügbare Märkte ab...")
-        try:
-            # Zugriff auf die Datenpipeline über den MainController
-            if hasattr(self.main_controller, 'data_pipeline'):
-                # Liste der verfügbaren Symbole abrufen
-                available_markets = self.main_controller.data_pipeline.get_available_markets()
-                if not available_markets:
-                    self._send_direct_message(chat_id, "Keine Marktdaten verfügbar")
-                    return
-                
-                # Gruppieren nach Markttyp
-                markets_by_type = {}
-                for market in available_markets:
-                    market_type = market.get('type', 'crypto')
-                    if market_type not in markets_by_type:
-                        markets_by_type[market_type] = []
-                    markets_by_type[market_type].append(market)
-                
-                # Nachricht erstellen
-                message = "🏪 Verfügbare Märkte\n\n"
-                
-                for market_type, markets in markets_by_type.items():
-                    message += f"**{market_type.upper()}**\n"
-                    for market in markets[:10]:  # Begrenze auf die ersten 10 pro Typ
-                        symbol = market.get('symbol', 'Unbekannt')
-                        timeframes = market.get('timeframes', [])
-                        timeframes_str = ', '.join(timeframes[:5])  # Zeige die ersten 5 Timeframes
-                        if len(timeframes) > 5:
-                            timeframes_str += '...'
-                        
-                        message += f"• {symbol} ({timeframes_str})\n"
-                    
-                    if len(markets) > 10:
-                        message += f"... und {len(markets) - 10} weitere\n"
-                    
-                    message += "\n"
-                
-                # Buttons für Training und weitere Aktionen
-                buttons = []
-                
-                # Training-Buttons für die populärsten Symbole
-                top_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-                for symbol in top_symbols:
-                    # Finde das Symbol in den verfügbaren Märkten
-                    for market in available_markets:
-                        if market.get('symbol') == symbol:
-                            timeframes = market.get('timeframes', [])
-                            if timeframes:
-                                # Füge Buttons für die beiden häufigsten Timeframes hinzu
-                                common_timeframes = ["1h", "4h"] if all(tf in timeframes for tf in ["1h", "4h"]) else timeframes[:2]
-                                button_row = []
-                                for timeframe in common_timeframes:
-                                    button_row.append({
-                                        "text": f"🧠 Train {symbol} {timeframe}",
-                                        "callback_data": f"train_model:{symbol}:{timeframe}"
-                                    })
-                                buttons.append(button_row)
-                
-                # Weitere Aktionen
-                buttons.append([
-                    {"text": "📊 Dashboard", "callback_data": "dashboard"},
-                    {"text": "📈 Performance", "callback_data": "performance"}
-                ])
-                
-                self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
-            else:
-                self._send_direct_message(chat_id, "Keine Datenpipeline verfügbar")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_train_command(self, chat_id, params):
-        """Handhabt den /train Befehl"""
-        if not params:
-            # Ohne Parameter zeigen wir Trainingsoptionen an
-            if hasattr(self.main_controller, 'learning_module'):
-                markets = self.main_controller.learning_module.markets
-                
-                message = "🧠 Training starten\n\nWähle ein Symbol und Timeframe für das Training:"
-                
-                # Buttons für verfügbare Märkte erstellen
-                buttons = []
-                for market in markets:
-                    symbol = market.get('symbol')
-                    timeframes = market.get('timeframes', [])
-                    
-                    for timeframe in timeframes:
-                        button_row = [{
-                            "text": f"{symbol} ({timeframe})",
-                            "callback_data": f"train_model:{symbol}:{timeframe}"
-                        }]
-                        buttons.append(button_row)
-                
-                buttons.append([
-                    {"text": "❌ Abbrechen", "callback_data": "dashboard"}
-                ])
-                
-                self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
-            else:
-                self._send_direct_message(chat_id, "Learning-Modul nicht verfügbar")
-        else:
-            # Mit Parametern starten wir das Training direkt
-            try:
-                parts = params.split()
-                if len(parts) >= 2:
-                    symbol = parts[0]
-                    timeframe = parts[1]
-                    self._handle_train_model(chat_id, symbol, timeframe)
-                else:
-                    self._send_direct_message(chat_id, "Ungültige Parameter. Format: /train SYMBOL TIMEFRAME\nBeispiel: /train BTC/USDT 1h")
-            except Exception as e:
-                self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_train_model(self, chat_id, symbol, timeframe):
-        """Startet das Training eines Modells für ein bestimmtes Symbol und Timeframe"""
-        if not self.main_controller or not hasattr(self.main_controller, 'learning_module'):
-            self._send_direct_message(chat_id, "Fehler: Learning-Modul nicht verfügbar")
-            return
-        
-        self._send_direct_message(chat_id, f"🧠 Starte Training für {symbol} ({timeframe})...\nDies kann einige Minuten dauern.")
-        
-        try:
-            # Trainingsauftrag im Hintergrund starten
-            def train_background():
-                try:
-                    result = self.main_controller.learning_module.train_model(symbol, timeframe)
-                    if result:
-                        self._send_direct_message(
-                            chat_id, 
-                            f"✅ Training für {symbol} ({timeframe}) erfolgreich abgeschlossen!"
-                        )
-                    else:
-                        self._send_direct_message(
-                            chat_id, 
-                            f"❌ Training für {symbol} ({timeframe}) fehlgeschlagen."
-                        )
-                except Exception as e:
-                    self._send_direct_message(
-                        chat_id, 
-                        f"❌ Fehler beim Training: {str(e)}"
-                    )
-            
-            # Training im Hintergrund ausführen
-            threading.Thread(target=train_background, daemon=True).start()
-            
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler beim Starten des Trainings: {str(e)}")
-    
-    def _handle_news_command(self, chat_id, params):
-        """Handhabt den /news Befehl"""
-        if not self.main_controller or not hasattr(self.main_controller, 'news_analyzer'):
-            self._send_direct_message(chat_id, "Fehler: News-Modul nicht verfügbar")
-            return
-        
-        if not params:
-            # Ohne Parameter zeigen wir allgemeine Marktnachrichten
-            self._send_direct_message(chat_id, "📰 Rufe aktuelle Krypto-News ab...")
-            
-            try:
-                # Markt-Sentiment abrufen
-                market_sentiment = self.main_controller.news_analyzer.get_market_sentiment()
-                
-                # Top-Events abrufen
-                market_events = self.main_controller.news_analyzer.detect_market_events()
-                
-                # Nachricht erstellen
-                message = "📰 Krypto-News Übersicht\n\n"
-                
-                # Markt-Sentiment
-                sentiment_score = market_sentiment.get('sentiment_score', 0)
-                sentiment_label = market_sentiment.get('sentiment_label', 'NEUTRAL')
-                news_count = market_sentiment.get('news_count', 0)
-                
-                # Emoji basierend auf Sentiment
-                sentiment_emoji = "🟢" if sentiment_score > 0.1 else "🔴" if sentiment_score < -0.1 else "⚪"
-                
-                message += f"**Markt-Sentiment:** {sentiment_emoji} {sentiment_label}\n"
-                message += f"Sentiment-Score: {sentiment_score:.2f}\n"
-                message += f"Analysierte News: {news_count}\n\n"
-                
-                # Wichtige Ereignisse
-                if market_events:
-                    message += "**Wichtige Ereignisse:**\n"
-                    for event in market_events[:3]:  # Zeige die Top 3 Ereignisse
-                        event_type = event.get('event_type', '').capitalize()
-                        event_title = event.get('title', 'Unbekanntes Ereignis')
-                        sentiment = event.get('sentiment_label', 'NEUTRAL')
-                        sentiment_emoji = "🟢" if sentiment == 'BULLISH' else "🔴" if sentiment == 'BEARISH' else "⚪"
-                        
-                        message += f"• {event_type}: {event_title} {sentiment_emoji}\n"
-                        
-                        # Betroffene Assets
-                        affected_assets = event.get('affected_assets', [])
-                        if affected_assets:
-                            message += f"  Betroffen: {', '.join(affected_assets)}\n"
-                
-                # Buttons für Aktionsoptionen
-                buttons = [
-                    [
-                        {"text": "BTC News", "callback_data": "analyze_news:BTC"},
-                        {"text": "ETH News", "callback_data": "analyze_news:ETH"}
-                    ],
-                    [
-                        {"text": "SOL News", "callback_data": "analyze_news:SOL"},
-                        {"text": "📊 Dashboard", "callback_data": "dashboard"}
-                    ]
-                ]
-                
-                # Nachricht senden
-                self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
-                
-            except Exception as e:
-                self._send_direct_message(chat_id, f"❌ Fehler beim Abrufen der News: {str(e)}")
-        else:
-            # Mit Parameter zeigen wir News für ein bestimmtes Asset
-            asset = params.upper()
-            self._handle_analyze_news(chat_id, asset)
-    
-    def _handle_analyze_news(self, chat_id, asset):
-        """Analysiert News für ein bestimmtes Asset"""
-        if not self.main_controller or not hasattr(self.main_controller, 'news_analyzer'):
-            self._send_direct_message(chat_id, "Fehler: News-Modul nicht verfügbar")
-            return
-        
-        self._send_direct_message(chat_id, f"📰 Analysiere News für {asset}...")
-        
-        try:
-            # Asset-News abrufen
-            news_summary = self.main_controller.news_analyzer.get_asset_news_summary(asset)
-            
-            # Nachricht erstellen
-            message = f"📰 News für {asset}\n\n"
-            
-            # Sentiment
-            sentiment = news_summary.get('sentiment', {})
-            sentiment_score = sentiment.get('sentiment_score', 0)
-            sentiment_label = sentiment.get('sentiment_label', 'NEUTRAL')
-            
-            # Emoji basierend auf Sentiment
-            sentiment_emoji = "🟢" if sentiment_score > 0.1 else "🔴" if sentiment_score < -0.1 else "⚪"
-            
-            message += f"**Sentiment:** {sentiment_emoji} {sentiment_label}\n"
-            message += f"Sentiment-Score: {sentiment_score:.2f}\n"
-            message += f"Analysierte News: {news_summary.get('news_count', 0)}\n\n"
-            
-            # Top-Themen
-            top_topics = news_summary.get('top_topics', [])
-            if top_topics:
-                message += "**Wichtigste Themen:**\n"
-                for topic in top_topics:
-                    topic_name = topic.capitalize().replace('_', ' ')
-                    message += f"• {topic_name}\n"
-                message += "\n"
-            
-            # Verwandte Assets
-            related_assets = news_summary.get('related_assets', [])
-            if related_assets:
-                message += "**Verwandte Assets:**\n"
-                message += f"{', '.join(related_assets)}\n\n"
-            
-            # Wichtige Artikel
-            important_articles = news_summary.get('important_articles', [])
-            if important_articles:
-                message += "**Wichtige Artikel:**\n"
-                for i, article in enumerate(important_articles[:3]):  # Top 3 Artikel
-                    title = article.get('title', 'Kein Titel')
-                    source = article.get('source', 'Unbekannt')
-                    sentiment = article.get('sentiment_score', 0)
-                    sentiment_emoji = "🟢" if sentiment > 0.1 else "🔴" if sentiment < -0.1 else "⚪"
-                    
-                    message += f"{i+1}. {sentiment_emoji} {title} ({source})\n"
-            
-            # Buttons für andere Assets und Aktionen
-            other_assets = ["BTC", "ETH", "SOL", "BNB", "XRP"]
-            other_assets = [a for a in other_assets if a != asset]
-            
-            buttons = []
-            # Erste Reihe mit anderen Assets
-            button_row = []
-            for other_asset in other_assets[:3]:
-                button_row.append({
-                    "text": f"{other_asset} News",
-                    "callback_data": f"analyze_news:{other_asset}"
-                })
-            buttons.append(button_row)
-            
-            # Zweite Reihe mit weiteren Aktionen
-            buttons.append([
-                {"text": "📰 Alle News", "callback_data": "news"},
-                {"text": "📊 Dashboard", "callback_data": "dashboard"}
-            ])
-            
-            # Nachricht senden
-            self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
-            
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler bei der News-Analyse für {asset}: {str(e)}")
-    
-    def _handle_optimize_portfolio(self, chat_id):
-        """Optimiert das Portfolio"""
-        if not self.main_controller or not hasattr(self.main_controller, 'portfolio_optimizer'):
-            self._send_direct_message(chat_id, "Fehler: Portfolio-Optimizer nicht verfügbar")
-            return
-        
-        self._send_direct_message(chat_id, "📊 Starte Portfolio-Optimierung...")
-        
-        try:
-            # Portfolio-Optimierung aufrufen
-            result = self.main_controller.optimize_portfolio()
-            
-            if result.get('status') == 'success':
-                optimization_data = result.get('data', {})
-                
-                # Nachricht erstellen
-                message = "📊 Portfolio-Optimierung\n\n"
-                
-                # Optimierte Allokation
-                allocation = optimization_data.get('allocation', {})
-                if allocation:
-                    message += "**Optimierte Allokation:**\n"
-                    for asset, weight in allocation.items():
-                        message += f"• {asset}: {weight*100:.1f}%\n"
-                    message += "\n"
-                
-                # Performance-Metriken
-                metrics = optimization_data.get('metrics', {})
-                if metrics:
-                    message += "**Performance-Metriken:**\n"
-                    message += f"Erwartete Rendite: {metrics.get('expected_return', 0)*100:.2f}%\n"
-                    message += f"Volatilität: {metrics.get('volatility', 0)*100:.2f}%\n"
-                    message += f"Sharpe Ratio: {metrics.get('sharpe_ratio', 0):.3f}\n\n"
-                
-                # Optimierungsparameter
-                params = optimization_data.get('parameters', {})
-                if params:
-                    message += "**Optimierungsparameter:**\n"
-                    message += f"Ziel: {params.get('objective', 'Sharpe Ratio')}\n"
-                    message += f"Risikotoleranz: {params.get('risk_tolerance', 'Medium')}\n"
-                
-                # Buttons für Aktionen
-                buttons = [
-                    [
-                        {"text": "🧮 Neue Optimierung", "callback_data": "optimize_portfolio"},
-                        {"text": "📊 Dashboard", "callback_data": "dashboard"}
-                    ],
-                    [
-                        {"text": "💰 Kontostand", "callback_data": "balance"},
-                        {"text": "📈 Performance", "callback_data": "performance"}
-                    ]
-                ]
-                
-                # Nachricht senden
-                self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
-                
-                # Wenn ein Chart erstellt wurde, dieses senden
-                chart_path = optimization_data.get('chart_path')
-                if chart_path and os.path.exists(chart_path):
-                    self._send_photo(chat_id, chart_path)
-                    # Datei nach dem Senden löschen
-                    os.remove(chart_path)
-            else:
-                error_msg = result.get('message', 'Unbekannter Fehler')
-                self._send_direct_message(chat_id, f"❌ Fehler bei der Portfolio-Optimierung: {error_msg}")
         except Exception as e:
             self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
     
@@ -1339,13 +973,6 @@ Sonstige Funktionen:
                 ]
             ]
             
-            # Zusätzliche Funktionsbuttons
-            if hasattr(self.main_controller, 'news_analyzer'):
-                buttons.append([{"text": "📰 News", "callback_data": "news"}])
-            
-            if hasattr(self.main_controller, 'portfolio_optimizer'):
-                buttons.append([{"text": "🧮 Portfolio", "callback_data": "optimize_portfolio"}])
-            
             # Zeitstempel hinzufügen
             message += f"\nStand: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             
@@ -1618,17 +1245,20 @@ Sonstige Funktionen:
             self.notification_reset_time = current_time + timedelta(hours=1)
         
         # Prüfen, ob das Limit für diese Priorität erreicht ist
-        if priority in self.notification_counts:
-            if self.notification_counts[priority] >= self.max_notifications_per_hour.get(priority, 10):
-                self.logger.warning(f"Benachrichtigungslimit für Priorität '{priority}' erreicht")
+        if priority in self.notification_counts and priority in self.max_notifications_per_hour:
+            # Prüfe, ob das stündliche Limit erreicht wurde
+            if self.notification_counts[priority] >= self.max_notifications_per_hour[priority]:
+                self.logger.warning(f"Stündliches Limit für {priority}-Priorität erreicht")
                 return False
             
-            # Wenn letzte Benachrichtigung dieser Priorität zu nah
-            last_time = self.last_notification_time.get(priority)
-            if last_time and (current_time - last_time).total_seconds() < self.notification_cooldown:
-                return False
+            # Prüfe Cooldown für diese Priorität
+            if priority in self.last_notification_time:
+                time_since_last = (current_time - self.last_notification_time[priority]).total_seconds()
+                if time_since_last < self.notification_cooldown:
+                    self.logger.debug(f"Cooldown für {priority}-Priorität aktiv ({time_since_last:.1f}s/{self.notification_cooldown}s)")
+                    return False
             
-            # Zähler erhöhen und Zeit aktualisieren
+            # Aktualisiere Zähler und Zeitstempel
             self.notification_counts[priority] += 1
             self.last_notification_time[priority] = current_time
         
@@ -1636,32 +1266,29 @@ Sonstige Funktionen:
     
     def _format_notification(self, title: str, message: str, priority: str) -> str:
         """
-        Formatiert eine Benachrichtigung basierend auf ihrer Priorität.
+        Formatiert eine Benachrichtigung basierend auf der Priorität.
         Args:
             title: Titel der Benachrichtigung
             message: Inhalt der Benachrichtigung
             priority: Priorität ('low', 'normal', 'high', 'critical')
         Returns:
-            Formatierte Nachricht
+            Formatierte Nachricht als HTML-String
         """
         # Emoji basierend auf Priorität
-        priority_emojis = {
-            'low': 'ℹ️',
-            'normal': '📢',
+        emoji_map = {
+            'low': '📝',
+            'normal': 'ℹ️',
             'high': '⚠️',
             'critical': '🚨'
         }
-        emoji = priority_emojis.get(priority, 'ℹ️')
+        emoji = emoji_map.get(priority, 'ℹ️')
         
-        # Formatierung basierend auf Priorität
+        # HTML-Formatierung
         if priority == 'critical':
-            formatted_title = f"{emoji} !!! {title.upper()} !!!"
+            formatted_title = f"{emoji} {title.upper()} {emoji}"
         elif priority == 'high':
-            formatted_title = f"{emoji} {title.upper()}"
+            formatted_title = f"{emoji} {title}"
         else:
             formatted_title = f"{emoji} {title}"
         
-        # Zeitstempel hinzufügen
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        
-        return f"{formatted_title}\n\n{message}\n\n[{timestamp}]"
+        return f"{formatted_title}\n\n{message}"
