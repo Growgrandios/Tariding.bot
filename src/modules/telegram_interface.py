@@ -1,1212 +1,1343 @@
 # telegram_interface.py
 
 import os
+import sys
 import logging
-import threading
 import time
 import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union, Tuple, Callable
+import threading
+from typing import Dict, List, Any, Optional, Union, Callable
 import traceback
-import matplotlib.pyplot as plt
-import matplotlib
-import numpy as np
-import pandas as pd
-from pathlib import Path
-import requests
+from datetime import datetime
 
-# Für Headless-Server (ohne GUI)
-matplotlib.use('Agg')
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from telegram.ext import (
+    Updater, CommandHandler, CallbackQueryHandler, MessageHandler,
+    Filters, CallbackContext, ConversationHandler
+)
 
 class TelegramInterface:
     """
-    Telegram-Bot-Schnittstelle für die Fernsteuerung und Benachrichtigungen des Trading-Bots.
+    Telegram-Schnittstelle für den Trading Bot.
+    Ermöglicht die Steuerung und Überwachung über Telegram.
     """
     
-    def __init__(self, config: Dict[str, Any], main_controller=None):
+    def __init__(self, config: Dict[str, Any], controller=None):
         """
         Initialisiert die Telegram-Schnittstelle.
+        
+        Args:
+            config: Konfigurationseinstellungen mit Bot-Token und erlaubten Benutzern
+            controller: Referenz zum MainController
         """
         self.logger = logging.getLogger("TelegramInterface")
         self.logger.info("Initialisiere TelegramInterface...")
         
-        # API-Konfiguration
-        self.bot_token = config.get('bot_token', os.getenv('TELEGRAM_BOT_TOKEN', ''))
+        # Konfiguration
+        self.config = config or {}
+        self.controller = controller
         
-        # String oder Liste von IDs in String-Liste konvertieren
-        allowed_users_raw = config.get('allowed_users', [])
-        if isinstance(allowed_users_raw, str):
-            # String von kommagetrennten IDs parsen
-            self.allowed_users = [str(user_id.strip()) for user_id in allowed_users_raw.split(',') if user_id.strip()]
-        elif isinstance(allowed_users_raw, list):
-            # Liste von verschiedenen Typen in String konvertieren
-            self.allowed_users = [str(user_id) for user_id in allowed_users_raw if user_id]
-        else:
-            self.allowed_users = []
+        # Telegram Bot Token
+        self.token = self.config.get('bot_token', os.getenv('TELEGRAM_BOT_TOKEN', ''))
+        if not self.token:
+            self.logger.error("Kein Telegram Bot Token gefunden!")
+            self.is_ready = False
+            return
+            
+        # Autorisierte Benutzer
+        self.allowed_users = self.config.get('allowed_users', [])
+        self.admin_users = self.config.get('admin_users', [])
         
-        # Prüfen, ob Token und Benutzer konfiguriert sind
-        if not self.bot_token:
-            self.logger.error("Kein Telegram-Bot-Token konfiguriert")
-            self.is_configured = False
-        elif not self.allowed_users:
-            self.logger.warning("Keine erlaubten Telegram-Benutzer konfiguriert")
-            self.is_configured = True  # Wir können trotzdem starten, aber keine Befehle annehmen
-        else:
-            self.is_configured = True
-            self.logger.info(f"{len(self.allowed_users)} erlaubte Benutzer konfiguriert")
-        
-        # Benachrichtigungskonfiguration
-        self.notification_level = config.get('notification_level', 'INFO')
-        self.status_update_interval = config.get('status_update_interval', 3600)  # Sekunden
-        self.commands_enabled = config.get('commands_enabled', True)
-        
-        # Begrenzer für Benachrichtigungen
-        self.notification_cooldown = config.get('notification_cooldown', 60)  # Sekunden
-        self.last_notification_time = {}  # Dict für Zeitstempel der letzten Benachrichtigung pro Priorität
-        self.max_notifications_per_hour = {
-            'low': config.get('max_low_priority_per_hour', 10),
-            'normal': config.get('max_normal_priority_per_hour', 20),
-            'high': config.get('max_high_priority_per_hour', 30),
-            'critical': config.get('max_critical_priority_per_hour', 50)
-        }
-        
-        self.notification_counts = {
-            'low': 0,
-            'normal': 0,
-            'high': 0,
-            'critical': 0
-        }
-        
-        self.notification_reset_time = datetime.now() + timedelta(hours=1)
-        
-        # Hauptcontroller-Referenz
-        self.main_controller = main_controller
-        
-        # Thread für Bot-Updates
-        self.bot_thread = None
+        # Status
+        self.is_ready = False
         self.is_running = False
         
-        # Befehlsreferenzen
+        # Updater und Dispatcher
+        try:
+            self.updater = Updater(self.token, use_context=True)
+            self.dispatcher = self.updater.dispatcher
+            self.bot = self.updater.bot
+            
+            # Command Handlers registrieren
+            self._register_handlers()
+            
+            self.is_ready = True
+            self.logger.info("TelegramInterface erfolgreich initialisiert")
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Initialisierung: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            self.is_ready = False
+        
+        # Registrierte Befehle
         self.commands = {}
-        
-        # Verzeichnis für aufgezeichnete Transkripte
-        self.transcript_dir = Path('data/transcripts')
-        self.transcript_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Verzeichnis für temporäre Grafiken
-        self.charts_dir = Path('data/charts')
-        self.charts_dir.mkdir(parents=True, exist_ok=True)
-        
-        # HTTP Session für Requests
-        self.session = None
-        
-        self.logger.info("TelegramInterface erfolgreich initialisiert")
     
-    def register_commands(self, commands: Dict[str, Callable]):
-        """
-        Registriert benutzerdefinierte Befehle vom MainController.
-        """
-        self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle")
-        self.commands = commands
+    def _register_handlers(self):
+        """Registriert alle Command- und Callback-Handler."""
+        # Basis-Befehle
+        self.dispatcher.add_handler(CommandHandler("start", self._cmd_welcome))
+        self.dispatcher.add_handler(CommandHandler("help", self._cmd_help))
+        
+        # Bot-Steuerungsbefehle
+        self.dispatcher.add_handler(CommandHandler("status", self._cmd_status))
+        self.dispatcher.add_handler(CommandHandler("startbot", self._cmd_start_bot))
+        self.dispatcher.add_handler(CommandHandler("stopbot", self._cmd_stop_bot))
+        self.dispatcher.add_handler(CommandHandler("pausebot", self._cmd_pause_bot))
+        self.dispatcher.add_handler(CommandHandler("resumebot", self._cmd_resume_bot))
+        
+        # Trading-Befehle
+        self.dispatcher.add_handler(CommandHandler("balance", self._cmd_balance))
+        self.dispatcher.add_handler(CommandHandler("positions", self._cmd_positions))
+        self.dispatcher.add_handler(CommandHandler("orders", self._cmd_orders))
+        
+        # Analyse-Befehle
+        self.dispatcher.add_handler(CommandHandler("performance", self._cmd_performance))
+        self.dispatcher.add_handler(CommandHandler("market", self._cmd_market))
+        self.dispatcher.add_handler(CommandHandler("prediction", self._cmd_prediction))
+        
+        # Callback-Handler für Buttons
+        self.dispatcher.add_handler(CallbackQueryHandler(self._handle_button_press))
+        
+        # Fehlerhandler
+        self.dispatcher.add_error_handler(self._error_handler)
     
     def start(self):
-        """Startet den Telegram-Bot in einem separaten Thread."""
-        if not self.is_configured:
-            self.logger.warning("Telegram-Bot nicht konfiguriert, kann nicht gestartet werden")
+        """Startet den Telegram Bot im Hintergrund."""
+        if not self.is_ready:
+            self.logger.error("TelegramInterface ist nicht bereit zum Start")
             return False
-        
+            
         if self.is_running:
-            self.logger.warning("Telegram-Bot läuft bereits")
+            self.logger.warning("TelegramInterface läuft bereits")
             return True
-        
+            
         try:
-            self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
-            self.bot_thread.start()
-            
-            # Kurz warten, um sicherzustellen, dass der Bot gestartet wird
-            time.sleep(1)
+            # Bot im Hintergrund starten
+            self.updater.start_polling()
             self.is_running = True
-            self.logger.info("Telegram-Bot gestartet")
+            self.logger.info("TelegramInterface erfolgreich gestartet")
             
-            # Initialen Status an alle Benutzer senden
-            self._send_status_to_all_users("Bot gestartet", "Der Trading Bot wurde erfolgreich gestartet und ist bereit für Befehle.")
-            
-            # Timer für regelmäßige Statusupdates starten
-            if self.status_update_interval > 0:
-                self._start_status_update_timer()
+            # Admin-Benutzer benachrichtigen
+            for admin_id in self.admin_users:
+                try:
+                    self.send_message(
+                        admin_id,
+                        "🤖 Trading Bot wurde gestartet und ist jetzt über Telegram steuerbar.",
+                        disable_notification=True
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Konnte Admin {admin_id} nicht benachrichtigen: {str(e)}")
             
             return True
-            
         except Exception as e:
-            self.logger.error(f"Fehler beim Starten des Telegram-Bots: {str(e)}")
+            self.logger.error(f"Fehler beim Starten des Telegram Bots: {str(e)}")
             self.logger.error(traceback.format_exc())
             return False
     
-    def _run_bot(self):
-        """Führt den Telegram-Bot komplett ohne asyncio und Signal-Handler aus"""
-        try:
-            self.session = requests.Session()
-            last_update_id = 0
-            self.logger.info("Bot-Thread gestartet (HTTP-Polling-Modus)")
+    def stop(self):
+        """Stoppt den Telegram Bot."""
+        if not self.is_running:
+            self.logger.warning("TelegramInterface läuft nicht")
+            return True
             
-            while self.is_running:
-                try:
-                    # Direkter API-Aufruf mit Long-Polling
-                    response = self.session.get(
-                        f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
-                        params={
-                            "offset": last_update_id + 1,
-                            "timeout": 30,
-                            "allowed_updates": ["message", "callback_query"]
-                        },
-                        timeout=35
-                    )
-                    response.raise_for_status()
-                    
-                    # Verarbeite Updates
-                    data = response.json()
-                    if data.get("ok") and data.get("result"):
-                        for update in data["result"]:
-                            last_update_id = update["update_id"]
-                            self._handle_raw_update(update)
-                except Exception as e:
-                    self.logger.error(f"Polling-Fehler: {str(e)}")
-                    time.sleep(5)
-        except Exception as e:
-            self.logger.error(f"Kritischer Bot-Fehler: {str(e)}")
-            self.logger.error(traceback.format_exc())
-        finally:
-            self.logger.info("Bot-Thread beendet")
+        try:
+            self.updater.stop()
             self.is_running = False
-    
-    def _handle_raw_update(self, update):
-        """Verarbeitet ein Telegram-Update"""
-        try:
-            # Chat_id und Text extrahieren - abhängig vom Update-Typ
-            chat_id = None
-            user_id = None
-            text = None
-            callback_data = None
-            message_id = None
-            
-            # Prüfen ob Nachricht oder Callback-Query
-            if "message" in update:
-                message = update["message"]
-                chat_id = message.get("chat", {}).get("id")
-                user_id = message.get("from", {}).get("id")
-                text = message.get("text", "")
-                message_id = message.get("message_id")
-            elif "callback_query" in update:
-                callback_query = update["callback_query"]
-                chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
-                user_id = callback_query.get("from", {}).get("id")
-                callback_data = callback_query.get("data")
-                message_id = callback_query.get("message", {}).get("message_id")
-                
-                # Callback-Query beantworten
-                self.session.post(
-                    f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
-                    json={"callback_query_id": callback_query["id"]}
-                )
-            
-            # Autorisierung prüfen
-            if not chat_id or not self._is_authorized(str(user_id)):
-                return
-            
-            # Callback-Anfragen verarbeiten
-            if callback_data:
-                self._handle_callback_data(chat_id, callback_data, message_id)
-                return
-            
-            # Textnachrichten verarbeiten
-            if text:
-                # Befehle verarbeiten (beginnen mit /)
-                if text.startswith("/"):
-                    self._process_command(chat_id, text)
-                # Normale Nachrichten
-                else:
-                    self._send_direct_message(chat_id, "Ich verstehe nur Befehle. Verwende /help für eine Liste der verfügbaren Befehle.")
-        
+            self.logger.info("TelegramInterface erfolgreich gestoppt")
+            return True
         except Exception as e:
-            self.logger.error(f"Fehler bei der Update-Verarbeitung: {str(e)}")
+            self.logger.error(f"Fehler beim Stoppen des Telegram Bots: {str(e)}")
             self.logger.error(traceback.format_exc())
+            return False
     
-    def _handle_callback_data(self, chat_id, callback_data, message_id=None):
-        """Verarbeitet Callback-Daten von Inline-Buttons"""
+    # Hilfsfunktionen
+    
+    def _is_user_authorized(self, user_id: int) -> bool:
+        """Prüft, ob ein Benutzer autorisiert ist."""
+        return str(user_id) in self.allowed_users or str(user_id) in self.admin_users
+    
+    def _is_admin(self, user_id: int) -> bool:
+        """Prüft, ob ein Benutzer Admin-Rechte hat."""
+        return str(user_id) in self.admin_users
+    
+    def send_message(self, chat_id: int, text: str, parse_mode: str = ParseMode.HTML,
+                     reply_markup: Any = None, disable_notification: bool = False) -> Optional[Any]:
+        """Sendet eine Nachricht an einen Chat."""
         try:
-            # Je nach Callback-Data unterschiedliche Aktionen ausführen
-            if callback_data == "startbot":
-                self._handle_start_bot(chat_id)
-            elif callback_data == "stopbot":
-                self._handle_stop_bot(chat_id)
-            elif callback_data == "pausebot":
-                self._handle_pause_bot(chat_id)
-            elif callback_data == "resumebot":
-                self._handle_resume_bot(chat_id)
-            elif callback_data == "balance":
-                self._handle_balance(chat_id)
-            elif callback_data == "positions":
-                self._handle_positions(chat_id)
-            elif callback_data == "performance":
-                self._handle_performance(chat_id)
-            elif callback_data == "dashboard":
-                self._send_dashboard(chat_id)
-            elif callback_data == "refresh_status":
-                self._send_status_message(chat_id, message_id)
-            elif callback_data == "help":
-                self._process_command(chat_id, "/help")
-            elif callback_data == "status":
-                self._send_status_message(chat_id)
-            elif callback_data == "refresh_positions":
-                self._handle_positions(chat_id)
-            elif callback_data == "close_all_positions":
-                self._confirm_close_all_positions(chat_id)
-            elif callback_data == "confirm_close_all":
-                self._execute_close_all_positions(chat_id)
-            elif callback_data == "cancel_close_all":
-                self._send_direct_message(chat_id, "Abgebrochen. Keine Positionen wurden geschlossen.")
-            else:
-                self._send_direct_message(chat_id, f"Unbekannte Aktion: {callback_data}")
+            return self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                disable_notification=disable_notification
+            )
         except Exception as e:
-            self.logger.error(f"Fehler bei der Callback-Verarbeitung: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            self._send_direct_message(chat_id, f"Fehler bei der Ausführung: {str(e)}")
-    
-    def _process_command(self, chat_id, command_text):
-        """Verarbeitet einen Befehl"""
-        # Befehl und Parameter extrahieren
-        parts = command_text.split(maxsplit=1)
-        command = parts[0][1:]  # Entferne das '/'
-        params = parts[1] if len(parts) > 1 else ""
-        
-        # Standard-Befehle
-        if command == "start":
-            self._send_direct_message(chat_id, "🤖 Bot aktiv! Nutze /help für Befehle")
-        elif command == "help":
-            help_text = """
-📋 Verfügbare Befehle:
-
-Grundlegende Befehle:
-/start - Startet den Bot und zeigt das Willkommensmenü
-/help - Zeigt diese Hilfe an
-/status - Zeigt den aktuellen Status des Trading Bots
-
-Trading-Steuerung:
-/startbot - Startet den Trading Bot
-/stopbot - Stoppt den Trading Bot
-/pausebot - Pausiert den Trading Bot
-/resumebot - Setzt den pausierten Trading Bot fort
-
-Trading-Informationen:
-/balance - Zeigt den aktuellen Kontostand
-/positions - Zeigt offene Positionen
-/performance - Zeigt Performance-Metriken
-
-Transkript-Verarbeitung:
-/processtranscript [Pfad] - Verarbeitet ein Transkript
-Du kannst auch direkt Transkriptdateien (.txt) senden
-
-Sonstige Funktionen:
-/dashboard - Zeigt ein interaktives Dashboard
-"""
-            self._send_direct_message(chat_id, help_text)
-        elif command == "status":
-            if self.main_controller:
-                self._send_status_message(chat_id)
-            else:
-                self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-        elif command == "startbot":
-            self._handle_start_bot(chat_id)
-        elif command == "stopbot":
-            self._handle_stop_bot(chat_id)
-        elif command == "pausebot":
-            self._handle_pause_bot(chat_id)
-        elif command == "resumebot":
-            self._handle_resume_bot(chat_id)
-        elif command == "balance":
-            self._handle_balance(chat_id)
-        elif command == "positions":
-            self._handle_positions(chat_id)
-        elif command == "performance":
-            self._handle_performance(chat_id)
-        elif command == "dashboard":
-            self._send_dashboard(chat_id)
-        elif command == "processtranscript":
-            if params:
-                self._handle_process_transcript(chat_id, params)
-            else:
-                self._send_direct_message(chat_id, "Bitte gib den Pfad zum Transkript an.\nBeispiel: /processtranscript data/transcripts/mein_transkript.txt")
-        else:
-            self._send_direct_message(chat_id, f"Unbekannter Befehl: /{command}\nVerwende /help für verfügbare Befehle.")
-    
-    def _handle_start_bot(self, chat_id):
-        """Startet den Trading Bot"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Starte Trading Bot...")
-        
-        try:
-            result = self.main_controller.start()
-            if result:
-                self._send_direct_message(chat_id, "✅ Trading Bot erfolgreich gestartet")
-            else:
-                self._send_direct_message(chat_id, "❌ Fehler beim Starten des Trading Bots")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_stop_bot(self, chat_id):
-        """Stoppt den Trading Bot"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Stoppe Trading Bot...")
-        
-        try:
-            result = self.main_controller.stop()
-            if result:
-                self._send_direct_message(chat_id, "✅ Trading Bot erfolgreich gestoppt")
-            else:
-                self._send_direct_message(chat_id, "❌ Fehler beim Stoppen des Trading Bots")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_pause_bot(self, chat_id):
-        """Pausiert den Trading Bot"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Pausiere Trading Bot...")
-        
-        try:
-            result = self.main_controller.pause()
-            if result:
-                self._send_direct_message(chat_id, "✅ Trading Bot erfolgreich pausiert")
-            else:
-                self._send_direct_message(chat_id, "❌ Fehler beim Pausieren des Trading Bots")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_resume_bot(self, chat_id):
-        """Setzt den pausierten Trading Bot fort"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Setze Trading Bot fort...")
-        
-        try:
-            result = self.main_controller.resume()
-            if result:
-                self._send_direct_message(chat_id, "✅ Trading Bot erfolgreich fortgesetzt")
-            else:
-                self._send_direct_message(chat_id, "❌ Fehler beim Fortsetzen des Trading Bots")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_balance(self, chat_id):
-        """Zeigt den aktuellen Kontostand"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Rufe Kontostand ab...")
-        
-        try:
-            result = self.main_controller._get_account_balance()
-            if result.get('status') == 'success':
-                balance_data = result.get('balance', {})
-                message = "💰 Kontostand\n\n"
-                
-                # Je nach Format der Balance-Daten anpassen
-                if isinstance(balance_data, dict):
-                    for currency, amount in balance_data.items():
-                        # Format Beträge mit angemessener Genauigkeit
-                        if float(amount) < 0.0001:
-                            formatted_amount = f"{float(amount):.8f}"
-                        elif float(amount) < 0.01:
-                            formatted_amount = f"{float(amount):.6f}"
-                        else:
-                            formatted_amount = f"{float(amount):.2f}"
-                        message += f"{currency}: {formatted_amount}\n"
-                else:
-                    message += str(balance_data)
-                
-                # Zeitstempel hinzufügen
-                message += f"\nStand: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                
-                self._send_direct_message(chat_id, message)
-            else:
-                error_msg = result.get('message', 'Unbekannter Fehler')
-                self._send_direct_message(chat_id, f"❌ Fehler: {error_msg}")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_positions(self, chat_id):
-        """Zeigt die offenen Positionen"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Rufe offene Positionen ab...")
-        
-        try:
-            result = self.main_controller._get_open_positions()
-            if result.get('status') == 'success':
-                positions = result.get('positions', [])
-                if not positions:
-                    self._send_direct_message(chat_id, "📊 Keine offenen Positionen vorhanden")
-                    return
-                
-                message = "📊 Offene Positionen\n\n"
-                for pos in positions:
-                    symbol = pos.get('symbol', 'Unbekannt')
-                    side = pos.get('side', 'Unbekannt')
-                    size = pos.get('size', 0)
-                    entry_price = pos.get('entry_price', 0)
-                    current_price = pos.get('current_price', 0)
-                    pnl = pos.get('unrealized_pnl', 0)
-                    pnl_percent = pos.get('unrealized_pnl_percent', 0)
-                    
-                    # Emojis basierend auf Position
-                    side_emoji = '🔴' if side.lower() == 'short' else '🟢'
-                    pnl_emoji = '📈' if pnl >= 0 else '📉'
-                    
-                    message += (
-                        f"{side_emoji} {symbol} ({side.upper()})\n"
-                        f"Größe: {size}\n"
-                        f"Einstieg: {entry_price}\n"
-                        f"Aktuell: {current_price}\n"
-                        f"PnL: {pnl_emoji} {pnl:.2f} ({pnl_percent:.2f}%)\n\n"
-                    )
-                
-                # Zeitstempel hinzufügen
-                message += f"Stand: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                
-                # Buttons für Aktionen
-                buttons = [
-                    [
-                        {"text": "🔄 Aktualisieren", "callback_data": "refresh_positions"},
-                        {"text": "❌ Alle schließen", "callback_data": "close_all_positions"}
-                    ]
-                ]
-                
-                self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
-            else:
-                error_msg = result.get('message', 'Unbekannter Fehler')
-                self._send_direct_message(chat_id, f"❌ Fehler: {error_msg}")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _handle_performance(self, chat_id):
-        """Zeigt Performance-Metriken"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
-            return
-        
-        self._send_direct_message(chat_id, "Rufe Performance-Metriken ab...")
-        
-        try:
-            result = self.main_controller._get_performance_metrics()
-            if result.get('status') == 'success':
-                metrics = result.get('metrics', {})
-                message = "📈 Performance-Metriken\n\n"
-                
-                # Trading-Metriken
-                if 'trading' in metrics:
-                    trading = metrics['trading']
-                    message += "Trading-Performance:\n"
-                    message += f"Trades gesamt: {trading.get('total_trades', 0)}\n"
-                    message += f"Gewinnende Trades: {trading.get('winning_trades', 0)}\n"
-                    message += f"Verlierende Trades: {trading.get('losing_trades', 0)}\n"
-                    win_rate = trading.get('win_rate', 0) * 100
-                    message += f"Win-Rate: {win_rate:.1f}%\n"
-                    avg_win = trading.get('avg_win', 0) * 100
-                    avg_loss = trading.get('avg_loss', 0) * 100
-                    message += f"Durchschn. Gewinn: {avg_win:.2f}%\n"
-                    message += f"Durchschn. Verlust: {avg_loss:.2f}%\n"
-                    total_pnl = trading.get('total_pnl', 0) * 100
-                    message += f"Gesamt-PnL: {total_pnl:.2f}%\n\n"
-                
-                # Steuerliche Informationen
-                if 'tax' in metrics:
-                    tax = metrics['tax']
-                    message += "Steuerliche Informationen:\n"
-                    message += f"Realisierte Gewinne: {tax.get('realized_gains', 0):.2f}\n"
-                    message += f"Realisierte Verluste: {tax.get('realized_losses', 0):.2f}\n"
-                    message += f"Netto-Gewinn: {tax.get('net_profit', 0):.2f}\n\n"
-                
-                # Lernmodul-Metriken
-                if 'learning' in metrics:
-                    learning = metrics['learning']
-                    message += "Modell-Performance:\n"
-                    message += f"Modell-Genauigkeit: {learning.get('model_accuracy', 0) * 100:.1f}%\n"
-                    message += f"Backtest-Score: {learning.get('backtest_score', 0):.3f}\n"
-                
-                # Zeitstempel hinzufügen
-                message += f"\nStand: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                
-                self._send_direct_message(chat_id, message)
-                
-                # Performance-Chart erstellen wenn genügend Daten vorhanden sind
-                if 'trading' in metrics and metrics['trading'].get('total_trades', 0) > 0:
-                    chart_path = self._create_performance_chart(metrics)
-                    if chart_path:
-                        self._send_photo(chat_id, chart_path)
-                        # Datei nach dem Senden löschen
-                        os.remove(chart_path)
-            else:
-                error_msg = result.get('message', 'Unbekannter Fehler')
-                self._send_direct_message(chat_id, f"❌ Fehler: {error_msg}")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
-    
-    def _create_performance_chart(self, metrics: Dict[str, Any]) -> Optional[str]:
-        """
-        Erstellt ein Leistungsdiagramm basierend auf den Performance-Metriken.
-        Returns:
-            Pfad zur erstellten Bilddatei oder None bei Fehler
-        """
-        try:
-            if 'trading' not in metrics or metrics['trading'].get('total_trades', 0) <= 0:
-                return None
-            
-            trading = metrics['trading']
-            
-            # Datei für das Diagramm erstellen
-            chart_filename = f"performance_{int(time.time())}.png"
-            chart_path = self.charts_dir / chart_filename
-            
-            # Diagramm erstellen
-            plt.figure(figsize=(10, 8))
-            
-            # 1. Pie-Chart für Gewinn/Verlust-Verhältnis
-            plt.subplot(2, 1, 1)
-            labels = ['Gewinnende Trades', 'Verlierende Trades']
-            sizes = [trading.get('winning_trades', 0), trading.get('losing_trades', 0)]
-            colors = ['#4CAF50', '#F44336']
-            explode = (0.1, 0)  # Explode den ersten Slice (Gewinnende Trades)
-            
-            plt.pie(sizes, explode=explode, labels=labels, colors=colors, autopct='%1.1f%%',
-                   shadow=True, startangle=140)
-            plt.axis('equal')  # Gleichmäßige Aspektverhältnisse für kreisförmigen Pie
-            plt.title('Win/Loss-Verhältnis')
-            
-            # 2. Balkendiagramm für Durchschnittliche Gewinne/Verluste
-            plt.subplot(2, 1, 2)
-            categories = ['Durchschn. Gewinn', 'Durchschn. Verlust', 'Gesamt-PnL']
-            values = [
-                trading.get('avg_win', 0) * 100,
-                trading.get('avg_loss', 0) * 100,
-                trading.get('total_pnl', 0) * 100
-            ]
-            
-            bars = plt.bar(categories, values, color=['#4CAF50', '#F44336', '#2196F3'])
-            
-            # Werte über den Balken anzeigen
-            for bar in bars:
-                height = bar.get_height()
-                plt.text(bar.get_x() + bar.get_width()/2., height + 0.5,
-                        f'{height:.2f}%', ha='center', va='bottom')
-            
-            plt.title('Durchschnittliche Gewinne und Verluste (%)')
-            plt.grid(axis='y', linestyle='--', alpha=0.7)
-            
-            plt.tight_layout()
-            plt.savefig(chart_path)
-            plt.close()
-            
-            return str(chart_path)
-        except Exception as e:
-            self.logger.error(f"Fehler beim Erstellen des Performance-Diagramms: {str(e)}")
+            self.logger.error(f"Fehler beim Senden einer Nachricht an {chat_id}: {str(e)}")
             return None
     
-    def _handle_process_transcript(self, chat_id, transcript_path):
-        """Verarbeitet ein Transkript"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
+    def register_commands(self, commands: Dict[str, Callable]):
+        """Registriert Befehle vom MainController."""
+        self.commands.update(commands)
+        self.logger.info(f"Befehle registriert: {', '.join(commands.keys())}")
+    
+    # Button-Handler
+    
+    def _handle_button_press(self, update: Update, context: CallbackContext):
+        """Verarbeitet Klicks auf Inline-Buttons."""
+        query = update.callback_query
+        user_id = query.from_user.id
+        
+        # Autorisierung prüfen
+        if not self._is_user_authorized(user_id):
+            query.answer("❌ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
             return
         
-        self._send_direct_message(chat_id, f"Starte Verarbeitung des Transkripts: {transcript_path}...")
-        
         try:
-            result = self.main_controller._process_transcript_command({'path': transcript_path})
+            # Callback-Daten extrahieren
+            callback_data = query.data
             
-            if result.get('status') == 'success':
-                result_data = result.get('result', {})
-                
-                # Erfolgreiche Verarbeitung
-                message = (
-                    f"✅ Transkript erfolgreich verarbeitet\n\n"
-                    f"Datei: {result_data.get('file', 'Unbekannt')}\n"
-                    f"Sprache: {result_data.get('language', 'Unbekannt')}\n"
-                    f"Chunks: {result_data.get('chunks', 0)}\n"
-                    f"Extrahierte Wissenselemente: {result_data.get('total_items', 0)}\n\n"
-                )
-                
-                # Details zu Kategorien
-                if 'knowledge_items' in result_data:
-                    message += "Elemente pro Kategorie:\n"
-                    for category, count in result_data['knowledge_items'].items():
-                        readable_category = category.replace('_', ' ').title()
-                        message += f"• {readable_category}: {count}\n"
-                
-                self._send_direct_message(chat_id, message)
+            # Bestätigung anzeigen
+            query.answer()
+            
+            # Callback-Typen verarbeiten
+            if callback_data == "menu":
+                # Hauptmenü anzeigen
+                self._show_main_menu(query.message)
+            elif callback_data == "status":
+                # Status abrufen (verzögerte Antwort über Edit)
+                query.edit_message_text("⏳ Aktualisiere Status...")
+                self._cmd_status(update, context)
+            elif callback_data == "balance":
+                # Kontostand abrufen
+                query.edit_message_text("⏳ Rufe Kontostand ab...")
+                self._cmd_balance(update, context)
+            elif callback_data == "positions":
+                # Positionen abrufen
+                query.edit_message_text("⏳ Rufe Positionen ab...")
+                self._cmd_positions(update, context)
+            elif callback_data == "orders":
+                # Orders abrufen
+                query.edit_message_text("⏳ Rufe Orders ab...")
+                self._cmd_orders(update, context)
+            elif callback_data == "performance":
+                # Performance abrufen
+                query.edit_message_text("⏳ Rufe Performance-Daten ab...")
+                self._cmd_performance(update, context)
+            elif callback_data == "startbot":
+                # Bot starten
+                query.edit_message_text("⏳ Starte Bot...")
+                self._cmd_start_bot(update, context)
+            elif callback_data == "stopbot":
+                # Bot stoppen
+                query.edit_message_text("⏳ Stoppe Bot...")
+                self._cmd_stop_bot(update, context)
+            elif callback_data == "pausebot":
+                # Bot pausieren
+                query.edit_message_text("⏳ Pausiere Bot...")
+                self._cmd_pause_bot(update, context)
+            elif callback_data == "resumebot":
+                # Bot fortsetzen
+                query.edit_message_text("⏳ Setze Bot fort...")
+                self._cmd_resume_bot(update, context)
+            elif callback_data == "market":
+                # Marktdaten abrufen
+                query.edit_message_text("⏳ Rufe Marktdaten ab...")
+                self._cmd_market(update, context)
+            elif callback_data == "prediction":
+                # Prognose abrufen
+                query.edit_message_text("⏳ Rufe Prognose ab...")
+                self._cmd_prediction(update, context)
             else:
-                error_msg = result.get('message', 'Unbekannter Fehler')
-                self._send_direct_message(chat_id, f"❌ Fehler: {error_msg}")
+                # Unbekannter Callback
+                query.edit_message_text(f"Unbekannte Aktion: {callback_data}")
         except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler: {str(e)}")
+            self.logger.error(f"Fehler bei der Verarbeitung des Button-Klicks: {str(e)}")
+            try:
+                query.edit_message_text(f"❌ Fehler: {str(e)}")
+            except:
+                pass
     
-    def _confirm_close_all_positions(self, chat_id):
-        """Bestätigung für das Schließen aller Positionen anfordern"""
-        message = (
-            "⚠️ Bestätigung erforderlich\n\n"
-            "Bist du sicher, dass du ALLE offenen Positionen schließen möchtest? "
-            "Dies kann nicht rückgängig gemacht werden."
+    # Command-Handler
+    
+    def _cmd_welcome(self, update: Update, context: CallbackContext):
+        """Begrüßt den Benutzer und zeigt Hauptmenü an."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        user_name = update.effective_user.first_name
+        
+        welcome_text = (
+            f"👋 Willkommen, {user_name}!\n\n"
+            "🤖 <b>Trading Bot</b>\n\n"
+            "Ich bin Ihr persönlicher Trading-Assistent. Über mich können Sie den Trading Bot steuern und überwachen.\n\n"
+            "Tippen Sie /help für eine Liste aller verfügbaren Befehle oder nutzen Sie das Menü unten."
         )
         
-        buttons = [
+        # Menü-Buttons erstellen
+        keyboard = [
             [
-                {"text": "✅ Ja, alle schließen", "callback_data": "confirm_close_all"},
-                {"text": "❌ Abbrechen", "callback_data": "cancel_close_all"}
+                InlineKeyboardButton("📊 Status", callback_data="status"),
+                InlineKeyboardButton("💰 Kontostand", callback_data="balance")
+            ],
+            [
+                InlineKeyboardButton("🚀 Bot starten", callback_data="startbot"),
+                InlineKeyboardButton("🛑 Bot stoppen", callback_data="stopbot")
+            ],
+            [
+                InlineKeyboardButton("📈 Positionen", callback_data="positions"),
+                InlineKeyboardButton("📋 Orders", callback_data="orders")
+            ],
+            [
+                InlineKeyboardButton("📉 Performance", callback_data="performance"),
+                InlineKeyboardButton("🌍 Markt", callback_data="market")
             ]
         ]
         
-        self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        update.message.reply_html(
+            welcome_text,
+            reply_markup=reply_markup
+        )
     
-    def _execute_close_all_positions(self, chat_id):
-        """Alle Positionen schließen"""
-        if not self.main_controller or not hasattr(self.main_controller, 'live_trading'):
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den LiveTrading-Modul")
+    def _cmd_help(self, update: Update, context: CallbackContext):
+        """Zeigt Hilfetext mit allen verfügbaren Befehlen."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
             return
         
-        self._send_direct_message(chat_id, "Schließe alle offenen Positionen...")
+        help_text = (
+            "🤖 <b>Trading Bot - Verfügbare Befehle</b>\n\n"
+            "<b>Allgemeine Befehle:</b>\n"
+            "/start - Startmenü anzeigen\n"
+            "/help - Diese Hilfe anzeigen\n"
+            "/status - Aktuellen Status des Bots anzeigen\n\n"
+            
+            "<b>Bot-Steuerung:</b>\n"
+            "/startbot - Trading Bot starten\n"
+            "/stopbot - Trading Bot stoppen\n"
+            "/pausebot - Trading pausieren (Überwachung bleibt aktiv)\n"
+            "/resumebot - Trading fortsetzen\n\n"
+            
+            "<b>Trading-Informationen:</b>\n"
+            "/balance - Kontostand anzeigen\n"
+            "/positions - Offene Positionen anzeigen\n"
+            "/orders - Offene Orders anzeigen\n\n"
+            
+            "<b>Analyse & Prognose:</b>\n"
+            "/performance - Performance-Metriken anzeigen\n"
+            "/market - Marktanalyse anzeigen\n"
+            "/prediction - Aktuelle Prognosen anzeigen\n"
+        )
         
-        try:
-            if hasattr(self.main_controller.live_trading, 'close_all_positions'):
-                result = self.main_controller.live_trading.close_all_positions()
-                self._send_direct_message(chat_id, f"✅ Alle Positionen geschlossen: {result}")
-            else:
-                self._send_direct_message(chat_id, "❌ Fehler: LiveTrading-Modul unterstützt diese Funktion nicht")
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler beim Schließen aller Positionen: {str(e)}")
+        # Admin-Befehle für Administratoren
+        if self._is_admin(user_id):
+            help_text += (
+                "\n<b>Admin-Befehle:</b>\n"
+                "/restart - Bot neu starten\n"
+                "/config - Konfiguration anzeigen/ändern\n"
+                "/logs - Aktuelle Logs anzeigen\n"
+            )
+        
+        keyboard = [[InlineKeyboardButton("🔙 Zurück zum Menü", callback_data="menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        update.message.reply_html(
+            help_text,
+            reply_markup=reply_markup
+        )
     
-    def _send_status_message(self, chat_id, message_id=None):
-        """Sendet eine Statusnachricht"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
+    def _cmd_status(self, update: Update, context: CallbackContext):
+        """Zeigt den aktuellen Status des Bots an."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
             return
         
-        try:
-            # Status vom MainController abrufen
-            status = self.main_controller.get_status()
-            
-            # Status formatieren
-            bot_state = status.get('state', 'unbekannt')
-            emoji_map = {
-                'running': '🟢',
-                'paused': '🟠',
-                'emergency': '🔴',
-                'error': '🔴',
-                'stopped': '⚪',
-                'ready': '🔵',
-                'initializing': '🔵'
-            }
-            emoji = emoji_map.get(bot_state, '⚪')
-            
-            # Detaillierte Statusinformationen
-            module_status = status.get('modules', {})
-            
-            # Nachricht zusammenstellen
-            message = (
-                f"Trading Bot Status {emoji}\n\n"
-                f"Status: {bot_state.upper()}\n"
-                f"Version: {status.get('version', 'unbekannt')}\n"
-                f"Laufzeit: {status.get('uptime', '00:00:00')}\n\n"
-                f"Module:\n"
-            )
-            
-            # Moduledetails hinzufügen
-            for module_name, module_info in module_status.items():
-                module_state = module_info.get('status', 'unbekannt')
-                module_emoji = '🟢' if module_state == 'running' else '⚪'
-                message += f"{module_emoji} {module_name}: {module_state}\n"
-            
-            # Letzte Events
-            events = status.get('events', [])
-            if events:
-                message += "\nLetzte Ereignisse:\n"
-                for event in events[-5:]:  # Zeige die letzten 5 Events
-                    event_time = datetime.fromisoformat(event['timestamp']).strftime('%H:%M:%S')
-                    event_type = event['type']
-                    event_title = event['title']
-                    message += f"• {event_time} [{event_type}] {event_title}\n"
-            
-            # Steuerungsbuttons
-            buttons = [
-                [
-                    {"text": "🔄 Aktualisieren", "callback_data": "refresh_status"},
-                    {"text": "📊 Dashboard", "callback_data": "dashboard"}
-                ],
-                [
-                    {"text": "🟢 Start", "callback_data": "startbot"},
-                    {"text": "🔴 Stop", "callback_data": "stopbot"},
-                    {"text": "⏸️ Pause", "callback_data": "pausebot"}
-                ]
-            ]
-            
-            # Nachricht senden oder aktualisieren
-            if message_id:
-                self._edit_message(chat_id, message_id, message, reply_markup={"inline_keyboard": buttons})
-            else:
-                self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
-        
-        except Exception as e:
-            error_message = f"Fehler beim Abrufen des Status: {str(e)}"
-            self.logger.error(error_message)
-            self._send_direct_message(chat_id, error_message)
-    
-    def _send_dashboard(self, chat_id):
-        """Sendet ein Dashboard mit aktuellen Informationen"""
-        if not self.main_controller:
-            self._send_direct_message(chat_id, "Fehler: Kein Zugriff auf den MainController")
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
             return
         
-        try:
-            # Status vom MainController abrufen
-            status = self.main_controller.get_status()
-            bot_state = status.get('state', 'unbekannt')
-            
-            # Emoji basierend auf Status
-            state_emojis = {
-                'running': '🟢',
-                'paused': '🟠',
-                'emergency': '🔴',
-                'error': '🔴',
-                'stopped': '⚪',
-                'ready': '🔵',
-                'initializing': '🔵'
-            }
-            state_emoji = state_emojis.get(bot_state, '⚪')
-            
-            # Kontostand abrufen
-            balance_result = self.main_controller._get_account_balance()
-            balance_data = balance_result.get('balance', {}) if balance_result.get('status') == 'success' else {}
-            
-            # Positionen abrufen
-            positions_result = self.main_controller._get_open_positions()
-            positions = positions_result.get('positions', []) if positions_result.get('status') == 'success' else []
-            
-            # Performance-Metriken abrufen
-            metrics_result = self.main_controller._get_performance_metrics()
-            metrics = metrics_result.get('metrics', {}) if metrics_result.get('status') == 'success' else {}
-            
-            # Dashboard zusammenstellen
-            message = (
-                f"📊 TRADING BOT DASHBOARD {state_emoji}\n\n"
-                f"Status: {bot_state.upper()}\n"
-            )
-            
-            # Kontostand
-            message += "\n💰 Kontostand:\n"
-            if balance_data:
-                for currency, amount in balance_data.items():
-                    if isinstance(amount, (int, float)) and amount > 0:
-                        if amount < 0.001:
-                            formatted_amount = f"{amount:.8f}"
-                        else:
-                            formatted_amount = f"{amount:.2f}"
-                        message += f"• {currency}: {formatted_amount}\n"
-            else:
-                message += "Keine Kontodaten verfügbar\n"
-            
-            # Offene Positionen
-            open_pos_count = len(positions)
-            message += f"\n📈 Offene Positionen ({open_pos_count}):\n"
-            if positions:
-                for i, pos in enumerate(positions[:3]):  # Max 3 anzeigen, um Platz zu sparen
-                    symbol = pos.get('symbol', 'Unbekannt')
-                    side = pos.get('side', 'Unbekannt')
-                    side_emoji = '🔴' if side.lower() == 'short' else '🟢'
-                    pnl = pos.get('unrealized_pnl', 0)
-                    pnl_percent = pos.get('unrealized_pnl_percent', 0)
-                    pnl_emoji = '📈' if pnl >= 0 else '📉'
-                    message += f"{side_emoji} {symbol} ({side}): {pnl_emoji} {pnl_percent:.2f}%\n"
-                
-                if open_pos_count > 3:
-                    message += f"... und {open_pos_count - 3} weitere\n"
-            else:
-                message += "Keine offenen Positionen\n"
-            
-            # Performance-Zusammenfassung
-            message += "\n📊 Performance:\n"
-            if 'trading' in metrics:
-                trading = metrics['trading']
-                win_rate = trading.get('win_rate', 0) * 100
-                total_trades = trading.get('total_trades', 0)
-                total_pnl = trading.get('total_pnl', 0) * 100
-                message += f"• Trades: {total_trades}\n"
-                message += f"• Win-Rate: {win_rate:.1f}%\n"
-                message += f"• Gesamt-PnL: {total_pnl:.2f}%\n"
-            else:
-                message += "Keine Performance-Daten verfügbar\n"
-            
-            # Letzte Ereignisse
-            events = status.get('events', [])
-            if events:
-                message += "\n🔔 Letzte Ereignisse:\n"
-                for event in events[-3:]:  # Zeige nur die letzten 3
-                    event_time = datetime.fromisoformat(event['timestamp']).strftime('%H:%M:%S')
-                    event_type = event['type']
-                    event_title = event['title']
-                    
-                    # Emoji je nach Event-Typ
-                    type_emojis = {
-                        'system': '🖥️',
-                        'error': '❌',
-                        'warning': '⚠️',
-                        'trade': '💱',
-                        'order': '📋',
-                        'position': '📊',
-                        'black_swan': '🦢',
-                        'emergency': '🚨'
-                    }
-                    type_emoji = type_emojis.get(event_type, '📌')
-                    message += f"• {event_time} {type_emoji} {event_title}\n"
-            
-            # Dashboard-Aktionen
-            buttons = [
-                [
-                    {"text": "🟢 Start", "callback_data": "startbot"},
-                    {"text": "🔴 Stop", "callback_data": "stopbot"},
-                    {"text": "⏸️ Pause", "callback_data": "pausebot"}
-                ],
-                [
-                    {"text": "💰 Kontodetails", "callback_data": "balance"},
-                    {"text": "📈 Alle Positionen", "callback_data": "positions"}
-                ],
-                [
-                    {"text": "📊 Performance", "callback_data": "performance"},
-                    {"text": "🔄 Aktualisieren", "callback_data": "dashboard"}
-                ]
-            ]
-            
-            # Zeitstempel hinzufügen
-            message += f"\nStand: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            
-            # Dashboard anzeigen
-            self._send_direct_message(chat_id, message, reply_markup={"inline_keyboard": buttons})
+        message = update.effective_message.reply_text("⏳ Rufe Statusdaten ab...")
         
-        except Exception as e:
-            error_message = f"Fehler beim Anzeigen des Dashboards: {str(e)}"
-            self.logger.error(error_message)
-            self.logger.error(traceback.format_exc())
-            self._send_direct_message(chat_id, f"❌ Fehler: {error_message}")
-    
-    def _is_authorized(self, user_id: str) -> bool:
-        """
-        Prüft, ob ein Benutzer autorisiert ist.
-        Args:
-            user_id: Telegram-Benutzer-ID
-        Returns:
-            True, wenn der Benutzer autorisiert ist, sonst False
-        """
-        # Wenn keine erlaubten Benutzer konfiguriert sind, ist niemand autorisiert
-        if not self.allowed_users:
-            self.logger.warning(f"Zugriff verweigert für Benutzer {user_id}: Keine erlaubten Benutzer konfiguriert")
-            return False
-        
-        is_authorized = user_id in self.allowed_users
-        if not is_authorized:
-            self.logger.warning(f"Zugriff verweigert für Benutzer {user_id}: Nicht autorisiert")
-        
-        return is_authorized
-    
-    def _send_direct_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
-        """Sendet eine Nachricht direkt via HTTP-Request"""
         try:
-            payload = {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": parse_mode
-            }
+            # Status vom Controller abrufen
+            status = self.controller.get_status()
             
-            if reply_markup:
-                payload["reply_markup"] = json.dumps(reply_markup)
-            
-            response = self.session.post(
-                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-                json=payload
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            self.logger.error(f"Fehler beim Senden der Nachricht: {str(e)}")
-            return None
-    
-    def _edit_message(self, chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
-        """Bearbeitet eine vorhandene Nachricht"""
-        try:
-            payload = {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": parse_mode
-            }
-            
-            if reply_markup:
-                payload["reply_markup"] = json.dumps(reply_markup)
-            
-            response = self.session.post(
-                f"https://api.telegram.org/bot{self.bot_token}/editMessageText",
-                json=payload
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            self.logger.error(f"Fehler beim Bearbeiten der Nachricht: {str(e)}")
-            return None
-    
-    def _send_photo(self, chat_id, photo_path, caption=None, parse_mode="HTML", reply_markup=None):
-        """Sendet ein Foto"""
-        try:
-            files = {
-                'photo': open(photo_path, 'rb')
-            }
-            
-            payload = {
-                "chat_id": chat_id
-            }
-            
-            if caption:
-                payload["caption"] = caption
-                payload["parse_mode"] = parse_mode
-            
-            if reply_markup:
-                payload["reply_markup"] = json.dumps(reply_markup)
-            
-            response = self.session.post(
-                f"https://api.telegram.org/bot{self.bot_token}/sendPhoto",
-                data=payload,
-                files=files
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            self.logger.error(f"Fehler beim Senden des Fotos: {str(e)}")
-            return None
-        finally:
-            # Datei schließen
-            if 'files' in locals() and 'photo' in files:
-                files['photo'].close()
-    
-    def _start_status_update_timer(self):
-        """Startet einen Timer für regelmäßige Statusupdates."""
-        def send_periodic_updates():
-            while self.is_running:
-                try:
-                    # Status abrufen und senden
-                    if self.main_controller:
-                        status = self.main_controller.get_status()
-                        self._send_status_summary_to_all_users(status)
-                except Exception as e:
-                    self.logger.error(f"Fehler beim Senden des regelmäßigen Statusupdates: {str(e)}")
-                
-                # Warten bis zum nächsten Update
-                time.sleep(self.status_update_interval)
-        
-        threading.Thread(target=send_periodic_updates, daemon=True).start()
-        self.logger.info(f"Status-Update-Timer gestartet (Intervall: {self.status_update_interval}s)")
-    
-    def _send_status_to_all_users(self, title: str, message: str):
-        """
-        Sendet eine Statusnachricht an alle erlaubten Benutzer.
-        Args:
-            title: Titel der Statusnachricht
-            message: Inhalt der Statusnachricht
-        """
-        for user_id in self.allowed_users:
-            try:
-                self._send_direct_message(user_id, f"{title}\n\n{message}")
-            except Exception as e:
-                self.logger.error(f"Fehler beim Senden der Statusnachricht an {user_id}: {str(e)}")
-    
-    def _send_status_summary_to_all_users(self, status: Dict[str, Any]):
-        """
-        Sendet eine Zusammenfassung des aktuellen Bot-Status an alle erlaubten Benutzer.
-        Args:
-            status: Status-Dictionary vom MainController
-        """
-        try:
-            # Status formatieren
-            bot_state = status.get('state', 'unbekannt')
-            emoji_map = {
-                'running': '🟢',
-                'paused': '🟠',
-                'emergency': '🔴',
-                'error': '🔴',
-                'stopped': '⚪',
-                'ready': '🔵',
-                'initializing': '🔵'
-            }
-            emoji = emoji_map.get(bot_state, '⚪')
+            # Status-Emoji basierend auf Bot-Status
+            status_emoji = {
+                "initializing": "🔄",
+                "ready": "✅",
+                "running": "▶️",
+                "paused": "⏸️",
+                "stopping": "⏹️",
+                "error": "❌",
+                "maintenance": "🔧",
+                "emergency": "🚨"
+            }.get(status.get('state', 'unknown'), "❓")
             
             # Module-Status
-            module_status = status.get('modules', {})
-            active_modules = sum(1 for mod in module_status.values() if mod.get('status') == 'running')
-            total_modules = len(module_status)
+            modules_status = "\n".join([
+                f"- {name}: {module_status.get('status', 'unknown')}"
+                for name, module_status in status.get('modules', {}).items()
+            ])
             
-            # Letzte Events
-            events = status.get('events', [])
-            recent_events = events[-3:] if events else []
+            # Trading-Status
+            trading_status = status.get('trading', {})
+            trading_active = trading_status.get('active', False)
+            trading_mode = trading_status.get('mode', 'unknown')
             
-            message = (
-                f"Trading Bot Status {emoji}\n\n"
-                f"Status: {bot_state.upper()}\n"
-                f"Aktive Module: {active_modules}/{total_modules}\n"
-                f"Update: {datetime.now().strftime('%H:%M:%S')}\n\n"
+            # Antwort-Text erstellen
+            status_text = (
+                f"{status_emoji} <b>Bot-Status: {status.get('state', 'unknown').upper()}</b>\n\n"
+                
+                f"<b>Trading:</b> {'Aktiv' if trading_active else 'Inaktiv'}\n"
+                f"<b>Modus:</b> {trading_mode}\n"
+                f"<b>Laufzeit:</b> {status.get('uptime', '0:00:00')}\n"
+                f"<b>Letzte Aktivität:</b> {status.get('last_activity', 'Keine')}\n\n"
+                
+                f"<b>Module:</b>\n{modules_status}\n\n"
+                
+                f"<b>Ereignisse:</b>\n"
+                f"- Trades heute: {status.get('trades_today', 0)}\n"
+                f"- Fehler heute: {status.get('errors_today', 0)}\n"
+                f"- Warnungen: {status.get('warnings', 0)}\n"
             )
             
-            if recent_events:
-                message += "Letzte Ereignisse:\n"
-                for event in reversed(recent_events):
-                    event_time = datetime.fromisoformat(event['timestamp']).strftime('%H:%M:%S')
-                    message += f"• {event_time} - {event['title']}\n"
-            
-            # Steuerungsbuttons hinzufügen
-            buttons = [
+            # Buttons für weitere Aktionen
+            keyboard = [
                 [
-                    {"text": "🟢 Start", "callback_data": "startbot"},
-                    {"text": "🔴 Stop", "callback_data": "stopbot"},
-                    {"text": "⏸️ Pause", "callback_data": "pausebot"}
+                    InlineKeyboardButton("🔄 Aktualisieren", callback_data="status"),
+                    InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
                 ],
                 [
-                    {"text": "💰 Kontostand", "callback_data": "balance"},
-                    {"text": "📊 Positionen", "callback_data": "positions"},
-                    {"text": "📈 Performance", "callback_data": "performance"}
+                    InlineKeyboardButton("📈 Positionen", callback_data="positions"),
+                    InlineKeyboardButton("💰 Kontostand", callback_data="balance")
                 ]
             ]
             
-            # An alle Benutzer senden
-            for user_id in self.allowed_users:
-                try:
-                    self._send_direct_message(
-                        user_id,
-                        message,
-                        reply_markup={"inline_keyboard": buttons}
-                    )
-                except Exception as e:
-                    self.logger.error(f"Fehler beim Senden der Statuszusammenfassung an {user_id}: {str(e)}")
-        
+            # Trading-Steuerungsbuttons basierend auf aktuellem Status
+            if status.get('state') == "running":
+                keyboard.append([
+                    InlineKeyboardButton("⏸️ Pausieren", callback_data="pausebot"),
+                    InlineKeyboardButton("⏹️ Stoppen", callback_data="stopbot")
+                ])
+            elif status.get('state') == "paused":
+                keyboard.append([
+                    InlineKeyboardButton("▶️ Fortsetzen", callback_data="resumebot"),
+                    InlineKeyboardButton("⏹️ Stoppen", callback_data="stopbot")
+                ])
+            elif status.get('state') in ["ready", "error"]:
+                keyboard.append([
+                    InlineKeyboardButton("▶️ Starten", callback_data="startbot")
+                ])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Nachricht aktualisieren
+            message.edit_text(
+                status_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup
+            )
         except Exception as e:
-            self.logger.error(f"Fehler beim Erstellen der Statuszusammenfassung: {str(e)}")
+            self.logger.error(f"Fehler beim Abrufen des Status: {str(e)}")
+            message.edit_text(f"❌ Fehler beim Abrufen des Status: {str(e)}")
     
-    def stop(self):
-        """Stoppt den Telegram-Bot."""
-        if not self.is_running:
-            self.logger.warning("Telegram-Bot läuft nicht")
-            return True
+    def _cmd_start_bot(self, update: Update, context: CallbackContext):
+        """Startet den Trading Bot."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Starte Trading Bot...")
         
         try:
-            self.is_running = False
-            
-            # Warten, bis der Thread beendet ist
-            if self.bot_thread and self.bot_thread.is_alive():
-                self.bot_thread.join(timeout=10)
-            
-            self.logger.info("Telegram-Bot gestoppt")
-            return True
-            
+            # Befehl vom Controller ausführen
+            if 'start' in self.commands:
+                result = self.commands['start']()
+                
+                if result:
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("📊 Status", callback_data="status"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("⏸️ Pausieren", callback_data="pausebot"),
+                            InlineKeyboardButton("⏹️ Stoppen", callback_data="stopbot")
+                        ]
+                    ]
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        "✅ Trading Bot erfolgreich gestartet!",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Fehler beim Starten des Trading Bots.")
+            else:
+                message.edit_text("❌ Start-Befehl nicht verfügbar.")
         except Exception as e:
-            self.logger.error(f"Fehler beim Stoppen des Telegram-Bots: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return False
+            self.logger.error(f"Fehler beim Starten des Bots: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_stop_bot(self, update: Update, context: CallbackContext):
+        """Stoppt den Trading Bot."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Stoppe Trading Bot...")
+        
+        try:
+            # Befehl vom Controller ausführen
+            if 'stop' in self.commands:
+                result = self.commands['stop']()
+                
+                if result:
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("📊 Status", callback_data="status"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("▶️ Starten", callback_data="startbot")
+                        ]
+                    ]
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        "✅ Trading Bot erfolgreich gestoppt!",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Fehler beim Stoppen des Trading Bots.")
+            else:
+                message.edit_text("❌ Stop-Befehl nicht verfügbar.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Stoppen des Bots: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_pause_bot(self, update: Update, context: CallbackContext):
+        """Pausiert den Trading Bot."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Pausiere Trading Bot...")
+        
+        try:
+            # Befehl vom Controller ausführen
+            if 'pause' in self.commands:
+                result = self.commands['pause']()
+                
+                if result:
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("📊 Status", callback_data="status"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("▶️ Fortsetzen", callback_data="resumebot"),
+                            InlineKeyboardButton("⏹️ Stoppen", callback_data="stopbot")
+                        ]
+                    ]
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        "⏸️ Trading Bot pausiert. Überwachung bleibt aktiv.",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Fehler beim Pausieren des Trading Bots.")
+            else:
+                message.edit_text("❌ Pause-Befehl nicht verfügbar.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Pausieren des Bots: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_resume_bot(self, update: Update, context: CallbackContext):
+        """Setzt den pausierten Trading Bot fort."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Setze Trading Bot fort...")
+        
+        try:
+            # Befehl vom Controller ausführen
+            if 'resume' in self.commands:
+                result = self.commands['resume']()
+                
+                if result:
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("📊 Status", callback_data="status"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("⏸️ Pausieren", callback_data="pausebot"),
+                            InlineKeyboardButton("⏹️ Stoppen", callback_data="stopbot")
+                        ]
+                    ]
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        "▶️ Trading Bot fortgesetzt!",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Fehler beim Fortsetzen des Trading Bots.")
+            else:
+                message.edit_text("❌ Resume-Befehl nicht verfügbar.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Fortsetzen des Bots: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_balance(self, update: Update, context: CallbackContext):
+        """Zeigt den aktuellen Kontostand."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Rufe Kontostand ab...")
+        
+        try:
+            # Führe den balance-Befehl aus, falls registriert
+            if 'balance' in self.commands:
+                balance = self.commands['balance']()
+                
+                if balance:
+                    # Balancedaten formatieren
+                    account_type = balance.get('account_type', 'Unbekannt')
+                    total = balance.get('total', {})
+                    free = balance.get('free', {})
+                    used = balance.get('used', {})
+                    
+                    # USDT-Bilanz hervorheben
+                    usdt_total = total.get('USDT', 0)
+                    usdt_free = free.get('USDT', 0)
+                    usdt_used = used.get('USDT', 0)
+                    
+                    # Andere Assets
+                    other_assets = []
+                    for currency, amount in total.items():
+                        if currency != 'USDT' and float(amount) > 0:
+                            free_amount = free.get(currency, 0)
+                            used_amount = used.get(currency, 0)
+                            other_assets.append(f"- {currency}: {amount:.6f} (Verfügbar: {free_amount:.6f}, In Verwendung: {used_amount:.6f})")
+                    
+                    other_assets_text = "\n".join(other_assets) if other_assets else "Keine"
+                    
+                    # Antwort-Text erstellen
+                    balance_text = (
+                        f"💰 <b>Kontostand ({account_type})</b>\n\n"
+                        f"<b>USDT Gesamt:</b> {usdt_total:.2f}\n"
+                        f"<b>USDT Verfügbar:</b> {usdt_free:.2f}\n"
+                        f"<b>USDT In Verwendung:</b> {usdt_used:.2f}\n\n"
+                        
+                        f"<b>Andere Assets:</b>\n"
+                        f"{other_assets_text}\n\n"
+                        
+                        f"<i>Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</i>"
+                    )
+                    
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("🔄 Aktualisieren", callback_data="balance"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("📈 Positionen", callback_data="positions"),
+                            InlineKeyboardButton("📋 Orders", callback_data="orders")
+                        ]
+                    ]
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        balance_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Konnte Kontostand nicht abrufen.")
+            else:
+                message.edit_text("❌ Balance-Befehl nicht verfügbar.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen des Kontostands: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_positions(self, update: Update, context: CallbackContext):
+        """Zeigt offene Positionen."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Rufe offene Positionen ab...")
+        
+        try:
+            # Führe den positions-Befehl aus, falls registriert
+            if 'positions' in self.commands:
+                positions = self.commands['positions']()
+                
+                if positions:
+                    # Positionen formatieren
+                    if len(positions) > 0:
+                        positions_text = "<b>📈 Offene Positionen</b>\n\n"
+                        
+                        for pos in positions:
+                            symbol = pos.get('symbol', 'Unbekannt')
+                            side = pos.get('side', 'Unbekannt')
+                            size = pos.get('contracts', 0)
+                            entry_price = pos.get('entryPrice', 0)
+                            current_price = pos.get('markPrice', 0)
+                            pnl = pos.get('unrealizedPnl', 0)
+                            
+                            # Emojis basierend auf Position und PnL
+                            side_emoji = "🔴" if side.lower() == "short" else "🟢"
+                            pnl_emoji = "📈" if float(pnl) > 0 else "📉"
+                            
+                            positions_text += (
+                                f"{side_emoji} <b>{symbol}</b> ({side.upper()})\n"
+                                f"Größe: {size} Kontrakte\n"
+                                f"Einstieg: {float(entry_price):.2f}\n"
+                                f"Aktuell: {float(current_price):.2f}\n"
+                                f"{pnl_emoji} PnL: {float(pnl):.2f} USDT\n\n"
+                            )
+                    else:
+                        positions_text = "📊 <b>Keine offenen Positionen</b>"
+                    
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("🔄 Aktualisieren", callback_data="positions"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("💰 Kontostand", callback_data="balance"),
+                            InlineKeyboardButton("📋 Orders", callback_data="orders")
+                        ]
+                    ]
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        positions_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Konnte offene Positionen nicht abrufen.")
+            else:
+                message.edit_text("❌ Positions-Befehl nicht verfügbar.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Positionen: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_orders(self, update: Update, context: CallbackContext):
+        """Zeigt offene Orders."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Rufe offene Orders ab...")
+        
+        try:
+            # Führe den orders-Befehl aus, falls registriert
+            if 'orders' in self.commands:
+                orders = self.commands['orders']()
+                
+                if orders:
+                    # Orders formatieren
+                    if len(orders) > 0:
+                        orders_text = "<b>📋 Offene Orders</b>\n\n"
+                        
+                        for order in orders:
+                            symbol = order.get('symbol', 'Unbekannt')
+                            order_id = order.get('id', 'Unbekannt')
+                            order_type = order.get('type', 'Unbekannt')
+                            side = order.get('side', 'Unbekannt')
+                            price = order.get('price', 0)
+                            amount = order.get('amount', 0)
+                            
+                            # Emojis basierend auf Order-Typ und Seite
+                            type_emoji = "📍" if order_type.lower() == "limit" else "⚡"
+                            side_emoji = "🔴" if side.lower() == "sell" else "🟢"
+                            
+                            orders_text += (
+                                f"{type_emoji}{side_emoji} <b>{symbol}</b>\n"
+                                f"ID: {order_id[:8]}...\n"
+                                f"Typ: {order_type.upper()} {side.upper()}\n"
+                                f"Preis: {float(price):.2f}\n"
+                                f"Menge: {float(amount):.6f}\n\n"
+                            )
+                    else:
+                        orders_text = "📋 <b>Keine offenen Orders</b>"
+                    
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("🔄 Aktualisieren", callback_data="orders"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("💰 Kontostand", callback_data="balance"),
+                            InlineKeyboardButton("📈 Positionen", callback_data="positions")
+                        ]
+                    ]
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        orders_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Konnte offene Orders nicht abrufen.")
+            else:
+                message.edit_text("❌ Orders-Befehl nicht verfügbar.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Orders: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_performance(self, update: Update, context: CallbackContext):
+        """Zeigt Performance-Metriken."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Rufe Performance-Daten ab...")
+        
+        try:
+            # Führe den performance-Befehl aus, falls registriert
+            if 'performance' in self.commands:
+                performance = self.commands['performance']()
+                
+                if performance:
+                    # Performance-Daten formatieren
+                    total_trades = performance.get('total_trades', 0)
+                    winning_trades = performance.get('winning_trades', 0)
+                    losing_trades = performance.get('losing_trades', 0)
+                    win_rate = performance.get('win_rate', 0) * 100
+                    
+                    profit_today = performance.get('profit_today', 0)
+                    profit_week = performance.get('profit_week', 0)
+                    profit_month = performance.get('profit_month', 0)
+                    profit_total = performance.get('profit_total', 0)
+                    
+                    # Weitere Metriken
+                    avg_profit = performance.get('avg_profit', 0)
+                    avg_loss = performance.get('avg_loss', 0)
+                    max_drawdown = performance.get('max_drawdown', 0) * 100
+                    sharpe_ratio = performance.get('sharpe_ratio', 0)
+                    
+                    # Antwort-Text erstellen
+                    performance_text = (
+                        f"📊 <b>Performance-Metriken</b>\n\n"
+                        
+                        f"<b>Handelsergebnisse:</b>\n"
+                        f"Trades gesamt: {total_trades}\n"
+                        f"Gewinne: {winning_trades}\n"
+                        f"Verluste: {losing_trades}\n"
+                        f"Win-Rate: {win_rate:.2f}%\n\n"
+                        
+                        f"<b>Profitabilität:</b>\n"
+                        f"Heute: {profit_today:.2f} USDT\n"
+                        f"Diese Woche: {profit_week:.2f} USDT\n"
+                        f"Diesen Monat: {profit_month:.2f} USDT\n"
+                        f"Gesamt: {profit_total:.2f} USDT\n\n"
+                        
+                        f"<b>Risikometriken:</b>\n"
+                        f"Ø Gewinn: {avg_profit:.2f} USDT\n"
+                        f"Ø Verlust: {avg_loss:.2f} USDT\n"
+                        f"Max. Drawdown: {max_drawdown:.2f}%\n"
+                        f"Sharpe Ratio: {sharpe_ratio:.2f}\n\n"
+                        
+                        f"<i>Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</i>"
+                    )
+                    
+                    # Buttons für weitere Aktionen
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("🔄 Aktualisieren", callback_data="performance"),
+                            InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                        ],
+                        [
+                            InlineKeyboardButton("📈 Positionen", callback_data="positions"),
+                            InlineKeyboardButton("💰 Kontostand", callback_data="balance")
+                        ]
+                    ]                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    message.edit_text(
+                        performance_text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                else:
+                    message.edit_text("❌ Konnte Performance-Daten nicht abrufen.")
+            else:
+                message.edit_text("❌ Performance-Befehl nicht verfügbar.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Performance-Daten: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_market(self, update: Update, context: CallbackContext):
+        """Zeigt Marktanalyse-Daten."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Rufe Marktdaten ab...")
+        
+        try:
+            # Marktdaten-Handler, falls vorhanden
+            market_data = None
+            if 'market' in self.commands:
+                market_data = self.commands['market']()
+            
+            if market_data:
+                # Marktdaten formatieren
+                market_text = "<b>🌍 Marktübersicht</b>\n\n"
+                
+                # Globale Markt-Stimmung
+                sentiment = market_data.get('sentiment', {})
+                sentiment_score = sentiment.get('score', 0)
+                sentiment_label = sentiment.get('label', 'Neutral')
+                
+                sentiment_emoji = {
+                    'BULLISH': '🟢',
+                    'SLIGHTLY_BULLISH': '🟢',
+                    'NEUTRAL': '⚪',
+                    'SLIGHTLY_BEARISH': '🔴',
+                    'BEARISH': '🔴'
+                }.get(sentiment_label, '⚪')
+                
+                market_text += f"<b>Markt-Stimmung:</b> {sentiment_emoji} {sentiment_label}\n\n"
+                
+                # Top Coins nach Performance
+                top_coins = market_data.get('top_performers', [])
+                if top_coins:
+                    market_text += "<b>Top Performer (24h):</b>\n"
+                    for coin in top_coins[:5]:
+                        market_text += f"- {coin['symbol']}: {coin['change_24h']:.2f}%\n"
+                    market_text += "\n"
+                
+                # Schlechteste Coins nach Performance
+                worst_coins = market_data.get('worst_performers', [])
+                if worst_coins:
+                    market_text += "<b>Schlechteste Performer (24h):</b>\n"
+                    for coin in worst_coins[:5]:
+                        market_text += f"- {coin['symbol']}: {coin['change_24h']:.2f}%\n"
+                    market_text += "\n"
+                
+                # Markt-Kapitaliserung und Volumen
+                market_cap = market_data.get('total_market_cap', 0)
+                volume_24h = market_data.get('total_volume_24h', 0)
+                btc_dominance = market_data.get('btc_dominance', 0)
+                
+                market_text += (
+                    f"<b>Markt-Kennzahlen:</b>\n"
+                    f"Gesamtmarkt-Kapitalisierung: ${market_cap:,.0f}\n"
+                    f"24h-Handelsvolumen: ${volume_24h:,.0f}\n"
+                    f"BTC-Dominanz: {btc_dominance:.2f}%\n\n"
+                )
+                
+                # Fear & Greed Index
+                fear_greed = market_data.get('fear_greed_index', {})
+                if fear_greed:
+                    value = fear_greed.get('value', 0)
+                    label = fear_greed.get('label', 'Neutral')
+                    
+                    # Emoji basierend auf Fear & Greed
+                    if value <= 25:
+                        fng_emoji = '😨'  # Extreme Fear
+                    elif value <= 40:
+                        fng_emoji = '😰'  # Fear
+                    elif value <= 60:
+                        fng_emoji = '😐'  # Neutral
+                    elif value <= 75:
+                        fng_emoji = '😊'  # Greed
+                    else:
+                        fng_emoji = '🤑'  # Extreme Greed
+                    
+                    market_text += f"<b>Fear & Greed Index:</b> {fng_emoji} {value} ({label})\n\n"
+                
+                market_text += f"<i>Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</i>"
+                
+                # Buttons für weitere Aktionen
+                keyboard = [
+                    [
+                        InlineKeyboardButton("🔄 Aktualisieren", callback_data="market"),
+                        InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                    ],
+                    [
+                        InlineKeyboardButton("🔮 Prognose", callback_data="prediction"),
+                        InlineKeyboardButton("📈 Positionen", callback_data="positions")
+                    ]
+                ]
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                message.edit_text(
+                    market_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
+                )
+            else:
+                message.edit_text("❌ Konnte Marktdaten nicht abrufen.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Marktdaten: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _cmd_prediction(self, update: Update, context: CallbackContext):
+        """Zeigt aktuelle Prognosen."""
+        user_id = update.effective_user.id
+        
+        if not self._is_user_authorized(user_id):
+            update.message.reply_text("⛔ Sie sind nicht autorisiert, diesen Bot zu verwenden.")
+            return
+        
+        if not self.controller:
+            update.message.reply_text("❌ Controller-Referenz fehlt!")
+            return
+        
+        message = update.effective_message.reply_text("⏳ Rufe Prognosen ab...")
+        
+        try:
+            # Prognosedaten-Handler, falls vorhanden
+            prediction_data = None
+            if 'prediction' in self.commands:
+                prediction_data = self.commands['prediction']()
+            
+            if prediction_data:
+                # Prognosedaten formatieren
+                predictions_text = "<b>🔮 Aktuelle Prognosen</b>\n\n"
+                
+                # Einzelne Asset-Prognosen
+                assets = prediction_data.get('assets', [])
+                if assets:
+                    for asset in assets:
+                        symbol = asset.get('symbol', 'Unbekannt')
+                        direction = asset.get('direction', 'Neutral')
+                        confidence = asset.get('confidence', 0) * 100
+                        timeframe = asset.get('timeframe', '1h')
+                        
+                        # Emoji basierend auf Richtung
+                        direction_emoji = '🟢' if direction == 'up' else '🔴' if direction == 'down' else '⚪'
+                        
+                        predictions_text += (
+                            f"{direction_emoji} <b>{symbol}</b> ({timeframe})\n"
+                            f"Richtung: {direction.upper()}\n"
+                            f"Konfidenz: {confidence:.1f}%\n\n"
+                        )
+                else:
+                    predictions_text += "Keine Asset-Prognosen verfügbar.\n\n"
+                
+                # Gesamtmarkt-Prognose
+                market_prediction = prediction_data.get('market', {})
+                if market_prediction:
+                    market_direction = market_prediction.get('direction', 'neutral')
+                    market_confidence = market_prediction.get('confidence', 0) * 100
+                    
+                    # Emoji basierend auf Marktrichtung
+                    market_emoji = '🟢' if market_direction == 'bullish' else '🔴' if market_direction == 'bearish' else '⚪'
+                    
+                    predictions_text += (
+                        f"<b>Gesamtmarkt-Prognose:</b>\n"
+                        f"{market_emoji} Richtung: {market_direction.upper()}\n"
+                        f"Konfidenz: {market_confidence:.1f}%\n\n"
+                    )
+                
+                predictions_text += f"<i>Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</i>"
+                
+                # Buttons für weitere Aktionen
+                keyboard = [
+                    [
+                        InlineKeyboardButton("🔄 Aktualisieren", callback_data="prediction"),
+                        InlineKeyboardButton("🔙 Hauptmenü", callback_data="menu")
+                    ],
+                    [
+                        InlineKeyboardButton("🌍 Markt", callback_data="market"),
+                        InlineKeyboardButton("📈 Positionen", callback_data="positions")
+                    ]
+                ]
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                message.edit_text(
+                    predictions_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
+                )
+            else:
+                message.edit_text("❌ Konnte Prognosen nicht abrufen.")
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Prognosen: {str(e)}")
+            message.edit_text(f"❌ Fehler: {str(e)}")
+    
+    def _show_main_menu(self, message):
+        """Zeigt das Hauptmenü mit allen verfügbaren Optionen."""
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Status", callback_data="status"),
+                InlineKeyboardButton("💰 Kontostand", callback_data="balance")
+            ],
+            [
+                InlineKeyboardButton("🚀 Bot starten", callback_data="startbot"),
+                InlineKeyboardButton("🛑 Bot stoppen", callback_data="stopbot")
+            ],
+            [
+                InlineKeyboardButton("📈 Positionen", callback_data="positions"),
+                InlineKeyboardButton("📋 Orders", callback_data="orders")
+            ],
+            [
+                InlineKeyboardButton("📉 Performance", callback_data="performance"),
+                InlineKeyboardButton("🌍 Markt", callback_data="market")
+            ],
+            [
+                InlineKeyboardButton("🔮 Prognose", callback_data="prediction")
+            ]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        message.edit_text(
+            "🤖 <b>Trading Bot - Hauptmenü</b>\n\n"
+            "Wählen Sie eine Option:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
     
     def send_notification(self, title: str, message: str, priority: str = "normal"):
         """
-        Sendet eine Benachrichtigung an alle erlaubten Benutzer.
+        Sendet eine Benachrichtigung an alle autorisierten Benutzer.
+        
         Args:
             title: Titel der Benachrichtigung
-            message: Inhalt der Benachrichtigung
+            message: Nachrichtentext
             priority: Priorität ('low', 'normal', 'high', 'critical')
         """
-        if not self.is_running or not self.allowed_users:
+        if not self.is_running:
+            self.logger.warning("TelegramInterface ist nicht aktiv. Benachrichtigung wird nicht gesendet.")
             return
         
-        # Prüfe Benachrichtigungslimits
-        if not self._check_notification_limits(priority):
-            return
-        
-        # Formatiere die Nachricht je nach Priorität
-        formatted_message = self._format_notification(title, message, priority)
-        
-        # Sende an alle erlaubten Benutzer
-        for user_id in self.allowed_users:
-            try:
-                self._send_direct_message(user_id, formatted_message)
-            except Exception as e:
-                self.logger.error(f"Fehler beim Senden der Benachrichtigung an {user_id}: {str(e)}")
-    
-    def _check_notification_limits(self, priority: str) -> bool:
-        """
-        Prüft, ob Benachrichtigungslimits erreicht wurden.
-        Args:
-            priority: Priorität der Benachrichtigung
-        Returns:
-            True, wenn die Benachrichtigung gesendet werden darf, sonst False
-        """
-        # Zurücksetzen der Zähler nach einer Stunde
-        current_time = datetime.now()
-        if current_time > self.notification_reset_time:
-            self.notification_counts = {k: 0 for k in self.notification_counts}
-            self.notification_reset_time = current_time + timedelta(hours=1)
-        
-        # Prüfe, ob das stündliche Limit erreicht wurde
-        if self.notification_counts[priority] >= self.max_notifications_per_hour[priority]:
-            self.logger.warning(f"Stündliches Limit für {priority}-Priorität erreicht")
-            return False
-        
-        # Prüfe Cooldown für diese Priorität
-        if priority in self.last_notification_time:
-            time_since_last = (current_time - self.last_notification_time[priority]).total_seconds()
-            if time_since_last < self.notification_cooldown:
-                self.logger.debug(f"Cooldown für {priority}-Priorität aktiv ({time_since_last:.1f}s/{self.notification_cooldown}s)")
-                return False
-        
-        # Aktualisiere Zähler und Zeitstempel
-        self.notification_counts[priority] += 1
-        self.last_notification_time[priority] = current_time
-        return True
-    
-    def _format_notification(self, title: str, message: str, priority: str) -> str:
-        """
-        Formatiert eine Benachrichtigung basierend auf der Priorität.
-        Args:
-            title: Titel der Benachrichtigung
-            message: Inhalt der Benachrichtigung
-            priority: Priorität ('low', 'normal', 'high', 'critical')
-        Returns:
-            Formatierte Nachricht als HTML-String
-        """
-        # Emoji basierend auf Priorität
-        emoji_map = {
-            'low': '📝',
-            'normal': 'ℹ️',
+        # Prioritäts-Emojis
+        priority_icons = {
+            'low': 'ℹ️',
+            'normal': '📢',
             'high': '⚠️',
             'critical': '🚨'
         }
-        emoji = emoji_map.get(priority, 'ℹ️')
         
-        # HTML-Formatierung
-        if priority == 'critical':
-            formatted_title = f"{emoji} <b>{title.upper()}</b> {emoji}"
-        elif priority == 'high':
-            formatted_title = f"{emoji} <b>{title}</b>"
-        else:
-            formatted_title = f"{emoji} {title}"
+        icon = priority_icons.get(priority, '📢')
         
-        return f"{formatted_title}\n\n{message}"
+        notification_text = f"{icon} <b>{title}</b>\n\n{message}"
+        
+        # An alle autorisierten Benutzer senden
+        for user_id in self.allowed_users:
+            try:
+                # Hohe Priorität = mit Benachrichtigung, sonst ohne
+                disable_notification = priority.lower() in ['low', 'normal']
+                self.send_message(
+                    user_id,
+                    notification_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_notification=disable_notification
+                )
+            except Exception as e:
+                self.logger.error(f"Fehler beim Senden der Benachrichtigung an {user_id}: {str(e)}")
+    
+    def _error_handler(self, update: object, context: CallbackContext):
+        """Behandelt Fehler in der Telegram-Bot-Verarbeitung."""
+        try:
+            if update:
+                # Wenn der Fehler innerhalb eines Updates aufgetreten ist
+                if isinstance(update, Update) and update.effective_message:
+                    chat_id = update.effective_message.chat_id
+                    update.effective_message.reply_text(
+                        "❌ Es ist ein Fehler aufgetreten. Bitte versuchen Sie es später noch einmal."
+                    )
+                # Log the error
+                self.logger.error(f"Update {update} caused error: {context.error}")
+            else:
+                self.logger.error(f"Error without update: {context.error}")
+            
+            # Traceback ins Log
+            self.logger.error(traceback.format_exc())
+        except Exception as e:
+            self.logger.error(f"Fehler im Error-Handler selbst: {str(e)}")
+    
+    # Utility-Methoden für den Controller
+    
+    def _get_account_balance(self):
+        """
+        Hilfsmethode für den Controller zum Abrufen des Kontostands.
+        
+        Returns:
+            Balance-Objekt oder None bei Fehler
+        """
+        if not self.controller:
+            self.logger.error("Controller-Referenz fehlt für _get_account_balance")
+            return None
+        
+        try:
+            # Live Trading Modul finden
+            if hasattr(self.controller, 'modules') and 'live_trading' in self.controller.modules:
+                live_trading = self.controller.modules['live_trading']
+                if hasattr(live_trading, 'get_account_balance'):
+                    return live_trading.get_account_balance()
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen des Kontostands: {str(e)}")
+            return None
+    
+    def _get_open_positions(self):
+        """
+        Hilfsmethode für den Controller zum Abrufen der offenen Positionen.
+        
+        Returns:
+            Liste der offenen Positionen oder None bei Fehler
+        """
+        if not self.controller:
+            self.logger.error("Controller-Referenz fehlt für _get_open_positions")
+            return None
+        
+        try:
+            # Live Trading Modul finden
+            if hasattr(self.controller, 'modules') and 'live_trading' in self.controller.modules:
+                live_trading = self.controller.modules['live_trading']
+                if hasattr(live_trading, 'get_open_positions'):
+                    return live_trading.get_open_positions()
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der offenen Positionen: {str(e)}")
+            return None
+    
+    def _get_performance_metrics(self):
+        """
+        Hilfsmethode für den Controller zum Abrufen der Performance-Metriken.
+        
+        Returns:
+            Performance-Metriken oder None bei Fehler
+        """
+        if not self.controller:
+            self.logger.error("Controller-Referenz fehlt für _get_performance_metrics")
+            return None
+        
+        try:
+            # Learning Module finden
+            if hasattr(self.controller, 'modules') and 'learning_module' in self.controller.modules:
+                learning_module = self.controller.modules['learning_module']
+                if hasattr(learning_module, 'get_performance_metrics'):
+                    return learning_module.get_performance_metrics()
+            
+            # Alternativ aus dem Tax Module
+            if hasattr(self.controller, 'modules') and 'tax_module' in self.controller.modules:
+                tax_module = self.controller.modules['tax_module']
+                if hasattr(tax_module, 'get_performance_metrics'):
+                    return tax_module.get_performance_metrics()
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Fehler beim Abrufen der Performance-Metriken: {str(e)}")
+            return None
+    
+    def _process_transcript_command(self, path: str = None):
+        """
+        Hilfsmethode für den Controller zum Verarbeiten eines Transkripts.
+        
+        Args:
+            path: Pfad zum Transkript (optional)
+            
+        Returns:
+            Ergebnis der Transkriptverarbeitung oder None bei Fehler
+        """
+        if not self.controller:
+            self.logger.error("Controller-Referenz fehlt für _process_transcript_command")
+            return None
+        
+        if not path:
+            self.logger.error("Kein Pfad für die Transkriptverarbeitung angegeben")
+            return None
+        
+        try:
+            if hasattr(self.controller, 'process_transcript'):
+                return self.controller.process_transcript(path)
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Fehler bei der Verarbeitung des Transkripts: {str(e)}")
+            return None
