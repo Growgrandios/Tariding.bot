@@ -10,7 +10,8 @@ from typing import Dict, List, Any, Optional, Union, Callable
 import traceback
 from datetime import datetime
 
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
     Updater, CommandHandler, CallbackQueryHandler, MessageHandler,
     Filters, CallbackContext, ConversationHandler
