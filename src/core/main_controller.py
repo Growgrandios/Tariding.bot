@@ -229,42 +229,37 @@ class MainController:
             raise
     
 def start(self, mode: str = None, auto_trade: bool = True):
-    # ... bestehender Code ...
-    try:
-        self.logger.info(f"Starte Trading Bot im Modus '{mode}'...")
-        self.previous_state = self.state
-        self.state = BotState.RUNNING
+try:
+    self.logger.info(f"Starte Trading Bot im Modus '{mode}'...")
+    self.previous_state = self.state
+    self.state = BotState.RUNNING
 
-        # Module starten
-        # Datenpipeline starten (für Marktdaten)
-        self.data_pipeline.start_auto_updates()
-        self.module_status['data_pipeline']['status'] = "running"
-        
-        # Verbindung zwischen BlackSwanDetector und DataPipeline erneuern
-        self.black_swan_detector.set_data_pipeline(self.data_pipeline)
-        
-        # Black Swan Detector starten
-        self.black_swan_detector.start_monitoring()
-        self.module_status['black_swan_detector']['status'] = "running"
+    # Module starten
+    # Datenpipeline starten (für Marktdaten)
+    self.data_pipeline.start_auto_updates()
+    self.module_status['data_pipeline']['status'] = "running"
+    
+    # Black Swan Detector starten
+    self.black_swan_detector.start_monitoring()
+    self.module_status['black_swan_detector']['status'] = "running"
 
-        # Telegram-Bot starten (korrekte Einrückung verwenden!)
-        self.telegram_interface.start()
-        self.module_status['telegram_interface']['status'] = "running"
-            
-            # Live Trading starten (falls aktiviert)
-            current_mode = mode or self.config.get('trading', {}).get('mode', 'paper')
-            
-            if auto_trade and current_mode != 'disabled':
-                if hasattr(self.live_trading, 'is_ready') and self.live_trading.is_ready:
-                    self.live_trading.start_trading(mode=current_mode)
-                    self.module_status['live_trading']['status'] = "running"
-                    self.logger.info(f"Live Trading aktiviert im Modus '{current_mode}'")
-                else:
-                    self.logger.warning("Live Trading nicht bereit, Trading wird deaktiviert")
-                    self.module_status['live_trading']['status'] = "disabled"
-            else:
-                self.logger.info("Automatisches Trading deaktiviert")
-                self.module_status['live_trading']['status'] = "disabled"
+    # Telegram-Bot starten
+    self.telegram_interface.start()
+    self.module_status['telegram_interface']['status'] = "running"
+    
+    # Live Trading starten (falls aktiviert)
+    current_mode = mode or self.config.get('trading', {}).get('mode', 'paper')
+    if auto_trade and current_mode != 'disabled':
+        if hasattr(self.live_trading, 'is_ready') and self.live_trading.is_ready:
+            self.live_trading.start_trading(mode=current_mode)
+            self.module_status['live_trading']['status'] = "running"
+            self.logger.info(f"Live Trading aktiviert im Modus '{current_mode}'")
+        else:
+            self.logger.warning("Live Trading nicht bereit, Trading wird deaktiviert")
+            self.module_status['live_trading']['status'] = "disabled"
+    else:
+        self.logger.info("Automatisches Trading deaktiviert")
+        self.module_status['live_trading']['status'] = "disabled"
             
             # Hauptüberwachungs-Thread starten
             self.running = True
