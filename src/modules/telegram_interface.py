@@ -22,39 +22,110 @@ os.environ['PYTHONUNBUFFERED'] = '1'  # Deaktiviert Signalhandling im Thread
 
 # Innerhalb der TelegramInterface-Klasse:
 def _run_bot(self):
-    """Führt den Telegram-Bot im Hintergrund aus."""
+    """Führt den Telegram-Bot im Hintergrund aus, ohne asyncio zu verwenden."""
     try:
-        # Neuen Event-Loop erstellen
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        # Initialisiere Requests für HTTP-Anfragen
+        import requests
+        self.session = requests.Session()
         
-        # Minimale Implementierung ohne Signalhandler
-        async def minimal_polling_loop():
-            # Initialisiere Application
-            await self.application.initialize()
-            
-            # Endlosschleife für Updates
-            offset = 0
-            while True:
-                try:
-                    # Manuelles Polling ohne Signal-Handler
-                    updates = await self.application.bot.get_updates(
-                        offset=offset,
-                        timeout=30,
-                        allowed_updates=Update.ALL_TYPES
-                    )
+        # Variable für das letzte abgerufene Update
+        last_update_id = 0
+        self.shutdown_requested = False
+        
+        self.logger.info("Bot-Thread gestartet, beginne mit Polling")
+        
+        # Endlosschleife für manuelles Polling
+        while not self.shutdown_requested:
+            try:
+                # Direkter API-Aufruf ohne asyncio
+                response = self.session.get(
+                    f"https://api.telegram.org/bot{self.bot_token}/getUpdates",
+                    params={
+                        "offset": last_update_id + 1,
+                        "timeout": 30
+                    },
+                    timeout=35  # Etwas höher als der Telegram-Timeout
+                )
+                response.raise_for_status()
+                
+                # Updates verarbeiten
+                data = response.json()
+                if data.get("ok") and data.get("result"):
+                    for update in data["result"]:
+                        # Update-ID aktualisieren
+                        last_update_id = update["update_id"]
+                        
+                        # Update verarbeiten
+                        self._handle_update_via_api(update)
+                
+            except Exception as e:
+                self.logger.error(f"Fehler beim Abrufen von Updates: {str(e)}")
+                time.sleep(5)  # Pause bei Fehlern
                     
-                    # Updates verarbeiten
-                    for update in updates:
-                        offset = update.update_id + 1
-                        await self.application.process_update(update)
-                        
-                    # Kurze Pause
-                    await asyncio.sleep(0.1)
-                        
-                except Exception as e:
-                    self.logger.error(f"Fehler beim Abrufen von Updates: {str(e)}")
-                    await asyncio.sleep(1)
+    except Exception as e:
+        self.logger.error(f"Kritischer Fehler im Bot-Thread: {str(e)}")
+        self.logger.error(traceback.format_exc())
+    finally:
+        self.logger.info("Bot-Thread beendet")
+        self.is_running = False
+
+def _handle_update_via_api(self, update):
+    """Verarbeitet ein Update manuell über die Telegram API."""
+    try:
+        # Zugrundeliegende Daten extrahieren
+        message = update.get("message")
+        
+        if not message:
+            return
+            
+        chat_id = message.get("chat", {}).get("id")
+        text = message.get("text", "")
+        user_id = message.get("from", {}).get("id")
+        
+        # Autorisierungsprüfung
+        if self.allowed_users and user_id not in self.allowed_users:
+            self.logger.warning(f"Nicht autorisierter Zugriff von User-ID {user_id}")
+            return
+            
+        # Befehle verarbeiten
+        if text and text.startswith("/"):
+            command = text.split()[0].lower()
+            
+            # Standard-Befehle
+            if command == "/start":
+                self._send_message(chat_id, "Bot gestartet! Verwende /help für Hilfe.")
+            elif command == "/help":
+                self._send_message(chat_id, "Verfügbare Befehle: /start, /help, /status")
+            elif command == "/status":
+                if self.main_controller:
+                    status = self.main_controller.get_status()
+                    self._send_message(chat_id, f"Status: {status}")
+                else:
+                    self._send_message(chat_id, "Status nicht verfügbar.")
+            else:
+                self._send_message(chat_id, f"Unbekannter Befehl: {command}")
+    except Exception as e:
+        self.logger.error(f"Fehler bei der Verarbeitung eines Updates: {str(e)}")
+
+def _send_message(self, chat_id, text, parse_mode=None):
+    """Sendet eine Nachricht über die Telegram API."""
+    try:
+        params = {
+            "chat_id": chat_id,
+            "text": text
+        }
+        
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+            
+        self.session.post(
+            f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+            json=params
+        )
+        return True
+    except Exception as e:
+        self.logger.error(f"Fehler beim Senden einer Nachricht: {str(e)}")
+        return False
         
         # Starte den minimalen Polling-Loop
         # HIER IST DIE WICHTIGE ÄNDERUNG:
