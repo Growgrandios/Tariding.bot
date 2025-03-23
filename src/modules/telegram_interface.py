@@ -57,6 +57,7 @@ def _run_bot(self):
                     await asyncio.sleep(1)
         
         # Starte den minimalen Polling-Loop
+        # HIER IST DIE WICHTIGE ÄNDERUNG:
         self.loop.run_until_complete(minimal_polling_loop())
     except Exception as e:
         self.logger.error(f"Fehler im Bot-Thread: {str(e)}")
