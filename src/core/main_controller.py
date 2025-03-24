@@ -11,7 +11,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional
 
-# Modul-Imports (stelle sicher, dass diese Pfade stimmen)
+# Modul-Imports – passe die Pfade an Deine Projektstruktur an!
 from src.core.config_manager import ConfigManager
 from src.modules.data_pipeline import DataPipeline
 from src.modules.live_trading import LiveTradingConnector
@@ -34,15 +34,14 @@ class BotState:
 
 class MainController:
     """
-    Hauptcontroller des Trading Bots. Er steuert alle Module und sorgt für
-    den stabilen Ablauf des Systems.
+    Hauptcontroller für den Trading Bot. Koordiniert alle Module und steuert den Betrieb.
     """
     def __init__(self, config_manager: Optional[ConfigManager] = None):
         self.logger = logging.getLogger("MainController")
         self.logger.info("Initialisiere MainController...")
         self.config_manager = config_manager
         
-        # Initiale Zustände
+        # Zustände und Flags
         self.state = BotState.INITIALIZING
         self.previous_state = None
         self.emergency_mode = False
@@ -59,13 +58,13 @@ class MainController:
         self.main_thread = None
         self.monitor_thread = None
         
-        # Signalhandler für Graceful Shutdown
+        # Signalhandler
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
         
-        # Module-Container
-        self.modules = {}
-        self.module_status = {}
+        # Module
+        self.modules: Dict[str, Any] = {}
+        self.module_status: Dict[str, Any] = {}
         
         # Konfiguration laden
         if self.config_manager:
@@ -94,53 +93,52 @@ class MainController:
         try:
             self.modules = {}
             self.module_status = {}
-            # DataPipeline
             self.logger.info("Initialisiere DataPipeline...")
             data_config = self.config_manager.get_config('data_pipeline')
             api_keys = self.config_manager.get_api_keys()
             self.data_pipeline = DataPipeline(api_keys)
             self.modules['data_pipeline'] = self.data_pipeline
             self.module_status['data_pipeline'] = {"status": "initialized", "errors": []}
-            # Black Swan Detector
+
             self.logger.info("Initialisiere BlackSwanDetector...")
             blackswan_config = self.config_manager.get_config('black_swan_detector')
             self.black_swan_detector = BlackSwanDetector(blackswan_config)
             self.modules['black_swan_detector'] = self.black_swan_detector
             self.module_status['black_swan_detector'] = {"status": "initialized", "errors": []}
             self.black_swan_detector.set_data_pipeline(self.data_pipeline)
-            # Live Trading Connector
+
             self.logger.info("Initialisiere LiveTradingConnector...")
             trading_config = self.config_manager.get_config('trading')
             trading_config.update(self.config_manager.get_api_key('bitget'))
             self.live_trading = LiveTradingConnector(trading_config)
             self.modules['live_trading'] = self.live_trading
             self.module_status['live_trading'] = {"status": "initialized", "errors": []}
-            # Learning Module
+
             self.logger.info("Initialisiere LearningModule...")
             learning_config = self.config_manager.get_config('learning_module')
             self.learning_module = LearningModule(learning_config)
             self.modules['learning_module'] = self.learning_module
             self.module_status['learning_module'] = {"status": "initialized", "errors": []}
-            # Telegram Interface
+
             self.logger.info("Initialisiere TelegramInterface...")
             telegram_config = self.config_manager.get_config('telegram')
             telegram_config.update(self.config_manager.get_api_key('telegram'))
             self.telegram_interface = TelegramInterface(telegram_config, self)
             self.modules['telegram_interface'] = self.telegram_interface
             self.module_status['telegram_interface'] = {"status": "initialized", "errors": []}
-            # Transcript Processor
+
             self.logger.info("Initialisiere TranscriptProcessor...")
             transcript_config = self.config_manager.get_config('transcript_processor') or {}
             self.transcript_processor = TranscriptProcessor(transcript_config)
             self.modules['transcript_processor'] = self.transcript_processor
             self.module_status['transcript_processor'] = {"status": "initialized", "errors": []}
-            # Tax Module
+
             self.logger.info("Initialisiere TaxModule...")
             tax_config = self.config_manager.get_config('tax_module')
             self.tax_module = TaxModule(tax_config)
             self.modules['tax_module'] = self.tax_module
             self.module_status['tax_module'] = {"status": "initialized", "errors": []}
-            # Module verbinden
+
             self._connect_modules()
             self.logger.info("Alle Module erfolgreich initialisiert")
         except Exception as e:
@@ -152,6 +150,7 @@ class MainController:
     def _connect_modules(self):
         try:
             self.black_swan_detector.register_notification_callback(self._handle_black_swan_event)
+            # Telegram-Befehle registrieren
             telegram_commands = {
                 'start': self.start,
                 'stop': self.stop,
@@ -184,16 +183,17 @@ class MainController:
             self.logger.info(f"Starte Trading Bot im Modus '{mode}'...")
             self.previous_state = self.state
             self.state = BotState.RUNNING
-            # Starte Datenupdates
+
             self.data_pipeline.start_auto_updates()
             self.module_status['data_pipeline']['status'] = "running"
-            # Starte BlackSwan-Monitoring
+
             self.black_swan_detector.start_monitoring()
             self.module_status['black_swan_detector']['status'] = "running"
-            # Starte Telegram-Bot (dieser läuft unabhängig weiter)
+
             self.telegram_interface.start()
             self.module_status['telegram_interface']['status'] = "running"
-            # Starte Live Trading (falls aktiviert)
+
+            # Starte Live Trading falls aktiviert
             current_mode = mode or self.config.get('trading', {}).get('mode', 'paper')
             if auto_trade and current_mode != 'disabled':
                 if getattr(self.live_trading, 'is_ready', False):
@@ -206,12 +206,13 @@ class MainController:
             else:
                 self.logger.info("Automatisches Trading deaktiviert")
                 self.module_status['live_trading']['status'] = "disabled"
-            # Starte Überwachungs-Threads
+
             self.running = True
             self.main_thread = threading.Thread(target=self._main_loop, daemon=True)
             self.main_thread.start()
             self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.monitor_thread.start()
+
             self.logger.info("Trading Bot erfolgreich gestartet")
             self._add_event("system", "Bot gestartet", {"mode": mode, "auto_trade": auto_trade})
             self._send_notification("Bot gestartet", f"Modus: {current_mode}\nTrading: {'Aktiviert' if auto_trade else 'Deaktiviert'}")
@@ -250,16 +251,21 @@ class MainController:
             self.logger.info("Stoppe Trading Bot...")
             self.previous_state = self.state
             self.state = BotState.STOPPING
+
             if self.module_status['live_trading']['status'] == "running":
                 self.live_trading.stop_trading()
                 self.module_status['live_trading']['status'] = "stopped"
+
             self.black_swan_detector.stop_monitoring()
             self.module_status['black_swan_detector']['status'] = "stopped"
+
             self.data_pipeline.stop_auto_updates()
             self.module_status['data_pipeline']['status'] = "stopped"
+
             self.running = False
             if self.main_thread and self.main_thread.is_alive():
                 self.main_thread.join(timeout=10)
+
             self.state = BotState.READY
             self.logger.info("Trading Bot erfolgreich gestoppt")
             self._add_event("system", "Bot gestoppt", {})
@@ -418,9 +424,9 @@ class MainController:
             if hasattr(self.data_pipeline, 'get_last_update_time'):
                 last_update = self.data_pipeline.get_last_update_time('crypto')
                 if last_update:
-                    time_diff = (datetime.datetime.now() - last_update).total_seconds()
-                    if time_diff > 300:
-                        self.logger.warning(f"Daten für 'crypto' sind veraltet ({time_diff:.0f} Sekunden)")
+                    diff = (datetime.datetime.now() - last_update).total_seconds()
+                    if diff > 300:
+                        self.logger.warning(f"Daten für 'crypto' sind veraltet ({diff:.0f} Sekunden)")
             if self.module_status['live_trading']['status'] == "running" and hasattr(self.live_trading, 'get_status'):
                 status = self.live_trading.get_status()
                 if status.get('exchange_status') != 'connected':
@@ -433,21 +439,21 @@ class MainController:
     def _handle_black_swan_event(self, event_data: Dict[str, Any]):
         severity = event_data.get('severity', 0)
         title = event_data.get('title', 'Black Swan Event')
-        message = event_data.get('message', 'Unbekanntes Marktereignis erkannt')
+        msg = event_data.get('message', 'Unbekanntes Marktereignis erkannt')
         details = event_data.get('details', {})
-        self.logger.warning(f"Black Swan Event erkannt: {title} (Schweregrad: {severity:.2f})")
-        self._add_event("black_swan", title, {"severity": severity, "message": message, "details": details})
+        self.logger.warning(f"Black Swan Event: {title} (Schweregrad: {severity:.2f})")
+        self._add_event("black_swan", title, {"severity": severity, "message": msg, "details": details})
         if severity > 0.8:
-            self._emergency_shutdown(message)
+            self._emergency_shutdown(msg)
         elif severity > 0.5:
             if self.state == BotState.RUNNING:
                 self.pause()
-            self._send_notification(f"⚠️ KRITISCHES MARKTEREIGNIS: {title}", message, priority="high")
+            self._send_notification(f"⚠️ KRITISCHES MARKTEREIGNIS: {title}", msg, priority="high")
         else:
-            self._send_notification(f"⚠️ Ungewöhnliches Marktereignis: {title}", message)
+            self._send_notification(f"⚠️ Ungewöhnliches Marktereignis: {title}", msg)
 
     def _emergency_shutdown(self, reason: str):
-        self.logger.critical(f"NOTFALL-SHUTDOWN eingeleitet: {reason}")
+        self.logger.critical(f"NOTFALL-SHUTDOWN: {reason}")
         try:
             self.previous_state = self.state
             self.state = BotState.EMERGENCY
@@ -470,7 +476,7 @@ class MainController:
                 self.live_trading.stop_trading()
                 self.module_status['live_trading']['status'] = "emergency_stopped"
             self._send_notification("🚨 NOTFALL-SHUTDOWN AKTIVIERT 🚨",
-                                    f"Grund: {reason}\nAlle Positionen wurden geschlossen und Trading deaktiviert.",
+                                    f"Grund: {reason}\nAlle Positionen geschlossen, Trading deaktiviert.",
                                     priority="critical")
             self._add_event("emergency", "Notfall-Shutdown", {"reason": reason})
         except Exception as e:
@@ -478,24 +484,24 @@ class MainController:
             self.logger.error(traceback.format_exc())
 
     def _handle_trading_error(self, error_data: Dict[str, Any]):
-        message = error_data.get('message', 'Unbekannter Trading-Fehler')
+        msg = error_data.get('message', 'Unbekannter Trading-Fehler')
         context = error_data.get('context', '')
-        consecutive_errors = error_data.get('consecutive_errors', 0)
-        self.logger.error(f"Trading-Fehler: {message} (Kontext: {context})")
-        self._add_event("error", "Trading-Fehler", {"message": message, "context": context, "consecutive_errors": consecutive_errors})
-        if consecutive_errors >= 5:
-            self.logger.warning(f"Zu viele Fehler ({consecutive_errors}), pausiere Trading")
+        errors = error_data.get('consecutive_errors', 0)
+        self.logger.error(f"Trading-Fehler: {msg} (Kontext: {context})")
+        self._add_event("error", "Trading-Fehler", {"message": msg, "context": context, "consecutive_errors": errors})
+        if errors >= 5:
+            self.logger.warning(f"Zu viele Fehler ({errors}), Trading wird pausiert")
             if self.state == BotState.RUNNING:
                 self.pause()
             self._send_notification("🛑 Trading automatisch pausiert",
-                                    f"Grund: {consecutive_errors} Fehler in Folge.\nLetzter Fehler: {message}",
+                                    f"{errors} Fehler in Folge.\nLetzter Fehler: {msg}",
                                     priority="high")
 
     def _handle_order_update(self, order_data: Dict[str, Any]):
-        order_id = order_data.get('id', 'unknown')
+        oid = order_data.get('id', 'unknown')
         symbol = order_data.get('symbol', 'unknown')
         status = order_data.get('status', 'unknown')
-        self.logger.info(f"Order-Update: {order_id} für {symbol} – Status: {status}")
+        self.logger.info(f"Order-Update: {oid} für {symbol} – Status: {status}")
         if hasattr(self.tax_module, 'process_order'):
             self.tax_module.process_order(order_data)
         if status == 'closed':
@@ -504,7 +510,7 @@ class MainController:
             price = order_data.get('price', 0)
             cost = order_data.get('cost', 0)
             self._send_notification(f"Order ausgeführt: {symbol}",
-                                    f"ID: {order_id}\nTyp: {side}\nMenge: {amount}\nPreis: {price}\nWert: {cost}",
+                                    f"ID: {oid}\nTyp: {side}\nMenge: {amount}\nPreis: {price}\nWert: {cost}",
                                     priority="low")
         self._add_event("order", f"Order {status}", order_data)
 
@@ -514,20 +520,20 @@ class MainController:
         self.logger.info(f"Positions-Update: {symbol} – Aktion: {action}")
         if action == 'close':
             side = position_data.get('side', 'unknown')
-            contracts_before = position_data.get('contracts_before', 0)
+            contracts = position_data.get('contracts_before', 0)
             pnl = position_data.get('pnl', 0)
-            pnl_percent = position_data.get('pnl_percent', 0)
-            msg = f"Richtung: {side}\nKontrakte: {contracts_before}\nPnL: {pnl:.2f} ({pnl_percent:.2f}%)"
+            pnl_pct = position_data.get('pnl_percent', 0)
+            msg = f"Richtung: {side}\nKontrakte: {contracts}\nPnL: {pnl:.2f} ({pnl_pct:.2f}%)"
             title = f"Position {'mit Gewinn' if pnl > 0 else 'mit Verlust'} geschlossen: {symbol}"
-            priority = "high" if pnl_percent < -5 else "normal"
+            priority = "high" if pnl_pct < -5 else "normal"
             self._send_notification(title, msg, priority=priority)
         elif action == 'open':
             side = position_data.get('side', 'unknown')
             contracts = position_data.get('contracts', 0)
-            entry_price = position_data.get('entry_price', 0)
+            entry = position_data.get('entry_price', 0)
             leverage = position_data.get('leverage', 1)
             self._send_notification(f"Neue Position eröffnet: {symbol}",
-                                    f"Richtung: {side}\nKontrakte: {contracts}\nEinstieg: {entry_price}\nHebel: {leverage}x",
+                                    f"Richtung: {side}\nKontrakte: {contracts}\nEinstieg: {entry}\nHebel: {leverage}x",
                                     priority="normal")
         self._add_event("position", f"Position {action}", position_data)
 
@@ -570,19 +576,18 @@ class MainController:
         side = trade_data.get('side', 'unknown')
         price = trade_data.get('price', 0)
         amount = trade_data.get('amount', 0)
-        self.logger.info(f"Trade ausgeführt: {symbol} {side} {amount} @ {price}")
+        self.logger.info(f"Trade: {symbol} {side} {amount} @ {price}")
         if hasattr(self.tax_module, 'process_trade'):
             self.tax_module.process_trade(trade_data)
         self._add_event("trade", "Trade ausgeführt", trade_data)
 
     def _send_notification(self, title: str, message: str, priority: str = "normal"):
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        formatted_message = f"{message}\n\nZeit: {timestamp}"
+        formatted = f"{message}\n\nZeit: {timestamp}"
         try:
-            # Nutze die send_notification()-Methode des Telegram-Interfaces
-            self.telegram_interface.send_notification(title, formatted_message, priority)
+            self.telegram_interface.send_notification(title, formatted, priority)
         except Exception as e:
-            self.logger.error(f"Fehler beim Senden der Telegram-Benachrichtigung: {str(e)}")
+            self.logger.error(f"Fehler beim Senden der Benachrichtigung: {str(e)}")
 
     def _add_event(self, event_type: str, title: str, data: Dict[str, Any]):
         event = {
@@ -616,7 +621,7 @@ class MainController:
             else:
                 return {'status': 'error', 'message': 'Live Trading ist nicht aktiv'}
         except Exception as e:
-            self.logger.error(f"Fehler beim Abrufen der offenen Positionen: {str(e)}")
+            self.logger.error(f"Fehler beim Abrufen offener Positionen: {str(e)}")
             return {'status': 'error', 'message': f"Fehler: {str(e)}"}
 
     def _get_performance_metrics(self) -> Dict[str, Any]:
@@ -626,18 +631,18 @@ class MainController:
                 metrics['learning'] = self.learning_module.performance_metrics
             if hasattr(self.learning_module, 'trade_history'):
                 trades = self.learning_module.trade_history
-                closed_trades = [t for t in trades if getattr(t, 'status', None) == 'closed']
-                if closed_trades:
-                    winning = [t for t in closed_trades if getattr(t, 'pnl_percent', 0) > 0]
-                    losing = [t for t in closed_trades if getattr(t, 'pnl_percent', 0) <= 0]
+                closed = [t for t in trades if getattr(t, 'status', None) == 'closed']
+                if closed:
+                    win = [t for t in closed if getattr(t, 'pnl_percent', 0) > 0]
+                    lose = [t for t in closed if getattr(t, 'pnl_percent', 0) <= 0]
                     metrics['trading'] = {
-                        'total_trades': len(closed_trades),
-                        'winning_trades': len(winning),
-                        'losing_trades': len(losing),
-                        'win_rate': len(winning) / len(closed_trades),
-                        'avg_win': sum(t.pnl_percent for t in winning) / len(winning) if winning else 0,
-                        'avg_loss': sum(t.pnl_percent for t in losing) / len(losing) if losing else 0,
-                        'total_pnl': sum(t.pnl_percent for t in closed_trades)
+                        'total_trades': len(closed),
+                        'winning_trades': len(win),
+                        'losing_trades': len(lose),
+                        'win_rate': len(win) / len(closed),
+                        'avg_win': sum(t.pnl_percent for t in win) / len(win) if win else 0,
+                        'avg_loss': sum(t.pnl_percent for t in lose) / len(lose) if lose else 0,
+                        'total_pnl': sum(t.pnl_percent for t in closed)
                     }
             if hasattr(self.tax_module, 'get_tax_summary'):
                 metrics['tax'] = self.tax_module.get_tax_summary()
@@ -678,7 +683,7 @@ class MainController:
             'last_update': datetime.datetime.now().isoformat(),
             'events': self.events[-10:],
             'version': '1.0.0',
-            'uptime': "00:00:00"  # Hier könnte die tatsächliche Laufzeit berechnet werden
+            'uptime': "00:00:00"
         }
 
     def _send_notification(self, title: str, message: str, priority: str = "normal"):
@@ -689,13 +694,13 @@ class MainController:
         except Exception as e:
             self.logger.error(f"Fehler beim Senden der Telegram-Benachrichtigung: {str(e)}")
 
-# Falls dieses Modul direkt ausgeführt wird
 if __name__ == "__main__":
     try:
+        from src.core.config_manager import ConfigManager
         cm = ConfigManager()
         controller = MainController(cm)
         if controller.state == BotState.READY:
-            controller.start(auto_trade=False)  # Beispielsweise im Paper-Modus starten
+            controller.start(auto_trade=False)
             while True:
                 time.sleep(1)
         else:
