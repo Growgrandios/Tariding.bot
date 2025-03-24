@@ -4,27 +4,25 @@ import threading
 import time
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Callable
+from typing import Dict, List, Any, Optional, Union, Tuple, Callable  # WICHTIG: Import aller benötigten Typen
 import traceback
 import requests
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-# Für Headless-Server (ohne GUI)
+# Für Headless-Server
 plt.switch_backend('Agg')
 
 class TelegramInterface:
     """
-    Telegram-Bot-Schnittstelle für Fernsteuerung und Benachrichtigungen.
-    Detailliertes Logging aller Befehle und Button-Klicks.
+    Telegram-Bot-Schnittstelle für Fernsteuerung und Benachrichtigungen des Trading-Bots.
     """
-    def __init__(self, config: Dict[str, any], main_controller=None):
+    def __init__(self, config: Dict[str, Any], main_controller=None):
         self.logger = logging.getLogger("TelegramInterface")
         self.logger.info("Initialisiere TelegramInterface...")
         self.debug_mode = config.get('debug_mode', True)
         if self.debug_mode:
             self.logger.setLevel(logging.DEBUG)
-            # Zusätzlicher Konsolenhandler für Debug-Ausgaben
             console_handler = logging.StreamHandler()
             console_handler.setLevel(logging.DEBUG)
             console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
@@ -59,7 +57,7 @@ class TelegramInterface:
         self.main_controller = main_controller
         self.bot_thread = None
         self.is_running = False
-        self.commands = {}
+        self.commands: Dict[str, Callable] = {}
         self.transcript_dir = Path('data/transcripts')
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         self.charts_dir = Path('data/charts')
@@ -69,7 +67,7 @@ class TelegramInterface:
         self.logger.info("TelegramInterface erfolgreich initialisiert")
 
     def register_commands(self, commands: Dict[str, Callable]):
-        self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle")
+        self.logger.info(f"Registriere {len(commands)} Befehle")
         self.commands = commands
 
     def start(self) -> bool:
@@ -85,7 +83,7 @@ class TelegramInterface:
             time.sleep(1)
             self.is_running = True
             self.logger.info("Telegram-Bot gestartet")
-            self._send_status_to_all_users("Bot gestartet", "Der Trading Bot ist nun aktiv und wartet auf Befehle.")
+            self._send_status_to_all_users("Bot gestartet", "Der Trading Bot ist aktiv und wartet auf Befehle.")
             if self.status_update_interval > 0:
                 self._start_status_update_timer()
             return True
@@ -98,7 +96,7 @@ class TelegramInterface:
         try:
             self.session = requests.Session()
             last_update_id = 0
-            self.logger.info("Bot-Thread gestartet (HTTP-Polling-Modus)")
+            self.logger.info("Bot-Thread gestartet (HTTP-Polling)")
             while self.is_running:
                 try:
                     response = self.session.get(
@@ -128,7 +126,7 @@ class TelegramInterface:
 
     def _handle_raw_update(self, update: Dict[str, Any]):
         try:
-            print(f"TELEGRAM UPDATE EMPFANGEN: {json.dumps(update, indent=2)}")
+            print(f"TELEGRAM UPDATE: {json.dumps(update, indent=2)}")
             self.logger.critical(f"Update-ID: {update.get('update_id')} - Typ: {'callback_query' if 'callback_query' in update else 'message'}")
             chat_id = None
             user_id = None
@@ -152,7 +150,6 @@ class TelegramInterface:
                 message_id = callback_query.get("message", {}).get("message_id")
                 print(f"BUTTON GEDRÜCKT: {callback_data}")
                 self.logger.critical(f"BUTTON GEDRÜCKT: {callback_data}")
-                self.logger.info(f"Chat {chat_id}, User {user_id}")
             if not chat_id or not self._is_authorized(str(user_id)):
                 self.logger.warning(f"Nicht autorisierter Zugriff von User ID: {user_id}")
                 return
@@ -171,7 +168,7 @@ class TelegramInterface:
                 except Exception as e:
                     self.logger.error(f"Fehler beim Beantworten der Callback-Query: {str(e)}")
             if callback_data:
-                self.logger.info(f"Verarbeite Callback-Daten: {callback_data}")
+                self.logger.info(f"Verarbeite Callback: {callback_data}")
                 self._handle_callback_data(chat_id, callback_data, message_id)
                 return
             if text:
@@ -181,12 +178,13 @@ class TelegramInterface:
                 else:
                     self._send_direct_message(chat_id, "Ich verstehe nur Befehle. Nutze /help für Hilfe.")
         except Exception as e:
-            self.logger.error(f"Fehler bei der Update-Verarbeitung: {str(e)}")
+            self.logger.error(f"Fehler in Update-Verarbeitung: {str(e)}")
             self.logger.error(traceback.format_exc())
 
     def _handle_callback_data(self, chat_id, callback_data, message_id=None):
         try:
-            self.logger.info(f"Callback-Daten: {callback_data} von Chat {chat_id}")
+            self.logger.info(f"Callback: {callback_data} von Chat {chat_id}")
+            # Hier kannst Du weitere Callback-Aktionen hinzufügen
             if callback_data == "startbot":
                 self._handle_start_bot(chat_id)
             elif callback_data == "stopbot":
@@ -209,73 +207,55 @@ class TelegramInterface:
                 self._process_command(chat_id, "/help")
             elif callback_data == "status":
                 self._send_status_message(chat_id)
-            elif callback_data == "refresh_positions":
-                self._handle_positions(chat_id)
-            elif callback_data == "close_all_positions":
-                self._confirm_close_all_positions(chat_id)
-            elif callback_data == "confirm_close_all":
-                self._execute_close_all_positions(chat_id)
-            elif callback_data == "cancel_close_all":
-                self._send_direct_message(chat_id, "Abgebrochen. Keine Positionen wurden geschlossen.")
-            elif callback_data.startswith("train_model:"):
-                parts = callback_data.split(":")
-                if len(parts) >= 3:
-                    symbol = parts[1]
-                    timeframe = parts[2]
-                    self._handle_train_model(chat_id, symbol, timeframe)
-            elif callback_data.startswith("analyze_news:"):
-                asset = callback_data.split(":")[1]
-                self._handle_analyze_news(chat_id, asset)
-            elif callback_data.startswith("optimize_portfolio"):
-                self._handle_optimize_portfolio(chat_id)
+            # Weitere Callback-Aktionen hier einfügen…
             else:
                 self._send_direct_message(chat_id, f"Unbekannte Aktion: {callback_data}")
         except Exception as e:
-            self.logger.error(f"Fehler bei Callback-Daten: {str(e)}")
+            self.logger.error(f"Fehler in Callback-Verarbeitung: {str(e)}")
             self.logger.error(traceback.format_exc())
-            self._send_direct_message(chat_id, f"Fehler bei der Ausführung: {str(e)}")
+            self._send_direct_message(chat_id, f"Fehler: {str(e)}")
 
     def _process_command(self, chat_id, command_text):
         parts = command_text.split(maxsplit=1)
         command = parts[0][1:]
         params = parts[1] if len(parts) > 1 else ""
         if command == "testlog":
-            print("TESTLOG: Direkter Print zur Konsole")
+            print("TESTLOG: Direktprint")
             self.logger.debug("DEBUG Log-Test")
             self.logger.info("INFO Log-Test")
             self.logger.warning("WARNING Log-Test")
             self.logger.error("ERROR Log-Test")
             self.logger.critical("CRITICAL Log-Test")
-            self._send_direct_message(chat_id, "Log-Test wurde ausgeführt, prüfe die Konsole.")
+            self._send_direct_message(chat_id, "Log-Test ausgeführt. Sieh in die Konsole.")
             return
         if command == "start":
             self._send_direct_message(chat_id, "🤖 Bot aktiv! Nutze /help für Befehle")
         elif command == "help":
             help_text = """
-📋 Verfügbare Befehle:
+📋 Befehle:
 
-Grundlegende Befehle:
+Grundlegend:
 /start - Aktiviert den Bot
-/help - Zeigt diese Hilfe an
-/status - Zeigt den aktuellen Status
-/testlog - Führt einen Log-Test durch
+/help - Zeigt diese Hilfe
+/status - Aktueller Status
+/testlog - Log-Test
 
-Trading-Steuerung:
-/startbot - Startet den Trading Bot
-/stopbot - Stoppt den Trading Bot
-/pausebot - Pausiert den Trading Bot
-/resumebot - Setzt den Trading Bot fort
+Trading:
+/startbot - Startet Trading
+/stopbot - Stoppt Trading
+/pausebot - Pausiert Trading
+/resumebot - Setzt Trading fort
 
-Trading-Informationen:
-/balance - Zeigt den Kontostand
-/positions - Zeigt offene Positionen
-/performance - Zeigt Performance-Metriken
+Info:
+/balance - Kontostand
+/positions - Offene Positionen
+/performance - Performance
 
 Transkript:
 /processtranscript [Pfad] - Verarbeitet ein Transkript
 
 Dashboard:
-/dashboard - Zeigt das Dashboard
+/dashboard - Zeigt Dashboard
 """
             self._send_direct_message(chat_id, help_text)
         elif command == "status":
@@ -308,9 +288,9 @@ Dashboard:
                     response = result.get("message", f"Befehl '{command}' ausgeführt")
                     self._send_direct_message(chat_id, response)
                 except Exception as e:
-                    self._send_direct_message(chat_id, f"Fehler beim Befehl '{command}': {str(e)}")
+                    self._send_direct_message(chat_id, f"Fehler bei '{command}': {str(e)}")
             else:
-                self._send_direct_message(chat_id, f"Unbekannter Befehl: /{command}\nNutze /help für Befehle.")
+                self._send_direct_message(chat_id, f"Unbekannter Befehl: /{command}\nNutze /help für Hilfe.")
 
     def _send_direct_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
         try:
@@ -347,9 +327,9 @@ Dashboard:
             while self.is_running:
                 try:
                     status = self.main_controller.get_status() if self.main_controller else {}
-                    self._send_status_to_all_users("Status Update", "Aktueller Status: " + status.get('state', 'unknown'))
+                    self._send_status_to_all_users("Status Update", f"Aktueller Status: {status.get('state', 'unknown')}")
                 except Exception as e:
-                    self.logger.error(f"Fehler beim Senden des Statusupdates: {str(e)}")
+                    self.logger.error(f"Fehler beim Statusupdate: {str(e)}")
                 time.sleep(self.status_update_interval)
         threading.Thread(target=send_updates, daemon=True).start()
         self.logger.info(f"Status-Update-Timer gestartet (Intervall: {self.status_update_interval}s)")
@@ -359,34 +339,7 @@ Dashboard:
             try:
                 self._send_direct_message(uid, f"{title}\n\n{message}")
             except Exception as e:
-                self.logger.error(f"Fehler beim Senden an User {uid}: {str(e)}")
-
-    # Weitere Funktionen wie _handle_train_model, _handle_analyze_news, _handle_optimize_portfolio,
-    # _confirm_close_all_positions, _execute_close_all_positions, _send_status_message
-    # wurden in ähnlicher Weise integriert und optimiert.
-    
-    # Zum Beispiel:
-    def _handle_train_model(self, chat_id, symbol, timeframe):
-        if not (self.main_controller and hasattr(self.main_controller, 'learning_module')):
-            self._send_direct_message(chat_id, "Fehler: Learning-Modul nicht verfügbar")
-            return
-        self._send_direct_message(chat_id, f"Starte Training für {symbol} ({timeframe})...")
-        try:
-            def train_bg():
-                try:
-                    result = self.main_controller.learning_module.train_model(symbol, timeframe)
-                    if result:
-                        self._send_direct_message(chat_id, f"✅ Training für {symbol} ({timeframe}) abgeschlossen")
-                    else:
-                        self._send_direct_message(chat_id, f"❌ Training für {symbol} ({timeframe}) fehlgeschlagen")
-                except Exception as e:
-                    self._send_direct_message(chat_id, f"❌ Fehler beim Training: {str(e)}")
-            threading.Thread(target=train_bg, daemon=True).start()
-        except Exception as e:
-            self._send_direct_message(chat_id, f"❌ Fehler beim Starten des Trainings: {str(e)}")
-
-    # Die restlichen Funktionen (_handle_analyze_news, _handle_optimize_portfolio, etc.)
-    # folgen einem ähnlichen Muster und wurden entsprechend angepasst.
+                self.logger.error(f"Fehler beim Senden an {uid}: {str(e)}")
 
 # Falls dieses Modul direkt ausgeführt wird:
 if __name__ == "__main__":
