@@ -8,17 +8,17 @@ import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Callable, Optional
 
-# Konstante für Telegram API URL
+# Basis-URL für Telegram API-Aufrufe
 TELEGRAM_API_URL = "https://api.telegram.org/bot{}/{}"
 
 class TelegramInterface:
     """
     Ein modernes Telegram Bot Interface Modul zur Fernsteuerung deines Trading Bots.
-    
+
     Funktionen:
       - Starten/Stoppen des Bots und (automatisch) der Google VM Instanz
       - Statusabfragen, Kontostand, offene Positionen und Performance-Berichte
-      - Notfall-Stop, Modul-spezifisches Steuern und regelmäßige Updates
+      - Notfall-Stop mit Bestätigung per Inline-Button
       - Interaktive Inline-Buttons für Aktionen (z. B. Notfall‑Stop bestätigen)
       - Erweiterbar und modular, um sich harmonisch in alle Bot-Module einzuklinken
     """
@@ -28,7 +28,7 @@ class TelegramInterface:
         
         self.config = config
         self.main_controller = main_controller
-        
+
         # Telegram-API Konfiguration
         self.bot_token = config.get("bot_token", os.getenv("TELEGRAM_BOT_TOKEN", ""))
         if not self.bot_token:
@@ -54,7 +54,7 @@ class TelegramInterface:
         self.is_running = False
         self.bot_thread: Optional[threading.Thread] = None
         
-        # Befehls-Mapping: command -> Handler-Methode
+        # Befehls-Mapping (wird auch via register_commands() überschrieben)
         self.commands: Dict[str, Callable[[Dict[str, Any]], None]] = {
             "start_bot": self._handle_start_bot,
             "stop_bot": self._handle_stop_bot,
@@ -75,17 +75,17 @@ class TelegramInterface:
         self.vm_zone = config.get("vm_zone", "us-central1-a")
         
         self.logger.info("Telegram Interface Modul erfolgreich initialisiert")
-
-  def register_commands(self, commands: Dict[str, Callable[[Dict[str, Any]], None]]):
-    """
-    Registriert benutzerdefinierte Befehle, die vom MainController übergeben werden.
     
-    Args:
-        commands: Ein Dictionary, das Befehlsnamen (z.B. "start", "stop") mit den zugehörigen Handler-Funktionen verknüpft.
-    """
-    self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle.")
-    self.commands = commands
-  
+    def register_commands(self, commands: Dict[str, Callable[[Dict[str, Any]], None]]):
+        """
+        Registriert benutzerdefinierte Befehle, die vom MainController übergeben werden.
+        
+        Args:
+            commands: Ein Dictionary, das Befehlsnamen (z. B. "start_bot", "stop_bot") mit den zugehörigen Handler-Funktionen verknüpft.
+        """
+        self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle.")
+        self.commands = commands
+
     def start(self):
         """Startet den Telegram Bot in einem separaten Thread (Polling-Modus)."""
         if self.is_running:
@@ -149,7 +149,7 @@ class TelegramInterface:
                 chat_id = callback.get("message", {}).get("chat", {}).get("id")
                 user_id = str(callback.get("from", {}).get("id"))
                 callback_data = callback.get("data", "").strip()
-                message_text = callback_data  # Für die Verarbeitung von Button-Aktionen
+                message_text = callback_data  # Für Button-Aktionen
             
             if not chat_id or not user_id:
                 self.logger.warning("Update ohne Chat-ID oder User-ID erhalten – überspringe.")
@@ -192,7 +192,10 @@ class TelegramInterface:
     def _send_notification_to_all(self, text: str):
         """Sendet eine Benachrichtigung an alle erlaubten Benutzer."""
         for user_id in self.allowed_users:
-            self._send_message(int(user_id), text)
+            try:
+                self._send_message(int(user_id), text)
+            except Exception as e:
+                self.logger.error(f"Fehler beim Senden der Benachrichtigung an {user_id}: {str(e)}")
     
     # --------------------- Befehls-Handler ---------------------
     def _handle_start_bot(self, context: Dict[str, Any]):
@@ -210,7 +213,7 @@ class TelegramInterface:
         else:
             start_msg = "VM Instanz konnte nicht gestartet werden:\n" + vm_response + "\n"
         
-        # Starte den Bot über den Main Controller (hier wird erwartet, dass main_controller.start() existiert)
+        # Starte den Bot über den MainController (erwartet, dass main_controller.start() existiert)
         try:
             self.main_controller.start(mode="live", auto_trade=True)
             start_msg += "Trading Bot wurde gestartet."
@@ -253,7 +256,7 @@ class TelegramInterface:
         chat_id = context["chat_id"]
         self.logger.info("Balanceabfrage erhalten")
         try:
-            balance = self.main_controller.get_account_balance()  # Muss im Main Controller implementiert sein
+            balance = self.main_controller.get_account_balance()  # Muss im MainController implementiert sein
             self._send_message(chat_id, f"<b>Kontostand:</b>\n{json.dumps(balance, indent=2)}")
         except Exception as e:
             self._send_message(chat_id, f"Fehler beim Abrufen des Kontostands: {str(e)}")
@@ -279,7 +282,7 @@ class TelegramInterface:
         chat_id = context["chat_id"]
         self.logger.info("Performanceabfrage erhalten")
         try:
-            performance = self.main_controller.get_performance_metrics()  # Muss im Main Controller implementiert sein
+            performance = self.main_controller.get_performance_metrics()  # Muss im MainController implementiert sein
             self._send_message(chat_id, f"<b>Performance:</b>\n{json.dumps(performance, indent=2)}")
         except Exception as e:
             self._send_message(chat_id, f"Fehler beim Abrufen der Performance: {str(e)}")
@@ -292,7 +295,7 @@ class TelegramInterface:
         chat_id = context["chat_id"]
         self.logger.info("Berichtsanforderung erhalten")
         try:
-            report = self.main_controller.generate_report()  # Beispielhafter Aufruf; muss in main_controller definiert sein
+            report = self.main_controller.generate_report()  # Muss im MainController implementiert sein
             self._send_message(chat_id, f"<b>Bericht:</b>\n{report}")
         except Exception as e:
             self._send_message(chat_id, f"Fehler beim Erzeugen des Berichts: {str(e)}")
@@ -301,11 +304,10 @@ class TelegramInterface:
         """
         /emergency
         Löst den Notfall-Stop aus und stoppt sofort alle Trading-Aktivitäten.
-        Bestätigungs-Button wird gesendet.
+        Es wird ein Inline-Button zur Bestätigung gesendet.
         """
         chat_id = context["chat_id"]
         self.logger.critical("EMERGENCY-Befehl empfangen! Notfall-Stop wird eingeleitet.")
-        # Sende Inline-Button zur Bestätigung
         reply_markup = {
             "inline_keyboard": [
                 [{"text": "Notfall stoppen", "callback_data": "confirm_emergency_stop"}]
@@ -316,7 +318,7 @@ class TelegramInterface:
     # --------------------- Inline-Callback-Handler ---------------------
     def _handle_callback_query(self, update: Dict[str, Any]):
         """
-        Verarbeitet Callback Queries (z. B. Button-Klicks).
+        Verarbeitet Callback Queries, z. B. Button-Klicks.
         """
         try:
             callback_query = update.get("callback_query", {})
@@ -325,19 +327,23 @@ class TelegramInterface:
             if data == "confirm_emergency_stop":
                 self.logger.critical("Notfall-Stop bestätigt über Button.")
                 try:
-                    self.main_controller.emergency_stop()  # Erwartet, dass main_controller eine entsprechende Methode hat
+                    self.main_controller.emergency_stop()  # Muss im MainController implementiert sein
                     self._send_message(chat_id, "Notfall-Stop wurde ausgeführt. Alle Aktivitäten wurden sofort gestoppt.")
                 except Exception as e:
                     self._send_message(chat_id, f"Fehler beim Ausführen des Notfall-Stops: {str(e)}")
         except Exception as e:
             self.logger.error(f"Fehler beim Verarbeiten der Callback Query: {str(e)}")
     
+    def process_callback_update(self, update: Dict[str, Any]):
+        """Öffentliche Methode, um Callback Updates zu verarbeiten."""
+        self._handle_callback_query(update)
+    
     # --------------------- Google VM Steuerung ---------------------
     def _start_vm_instance(self) -> (bool, str):
         """
         Startet die Google VM Instanz mithilfe der gcloud CLI.
         Voraussetzung: gcloud ist installiert und konfiguriert.
-        
+
         Rückgabe:
             (True, stdout) im Erfolgsfall, (False, stderr) sonst.
         """
@@ -361,11 +367,6 @@ class TelegramInterface:
             self.logger.error(f"Exception beim Starten der VM Instanz: {str(e)}")
             return False, str(e)
     
-    # --------------------- Public Callback für Callback Queries ---------------------
-    def process_callback_update(self, update: Dict[str, Any]):
-        """Öffentliche Methode, um Callback Updates zu verarbeiten."""
-        self._handle_callback_query(update)
-    
     # --------------------- Weitere Helper-Funktionen ---------------------
     def notify(self, priority: str, message: str):
         """
@@ -379,7 +380,7 @@ class TelegramInterface:
         self.last_notification_time[priority] = now
         self._send_notification_to_all(f"[{priority.upper()}] {message}")
 
-# Beispiel: Falls dieses Modul direkt gestartet wird
+# Beispielhafter Testlauf, falls dieses Modul direkt ausgeführt wird
 if __name__ == "__main__":
     # Beispielhafte Konfiguration
     config = {
@@ -391,7 +392,7 @@ if __name__ == "__main__":
         "vm_zone": "us-central1-a"
     }
     
-    # Dummy MainController mit minimalen Methoden (zum Testen)
+    # Dummy MainController zur Simulation der Schnittstelle
     class DummyMainController:
         def start(self, mode, auto_trade):
             print(f"Trading Bot gestartet im Modus {mode} (Auto Trade: {auto_trade})")
@@ -412,9 +413,23 @@ if __name__ == "__main__":
     
     dummy_controller = DummyMainController()
     bot = TelegramInterface(config, dummy_controller)
+    
+    # Registrierung von Befehlen über register_commands (wichtig für MainController-Aufrufe)
+    custom_commands = {
+        "start_bot": bot._handle_start_bot,
+        "stop_bot": bot._handle_stop_bot,
+        "status": bot._handle_status,
+        "balance": bot._handle_balance,
+        "positions": bot._handle_positions,
+        "performance": bot._handle_performance,
+        "report": bot._handle_report,
+        "emergency": bot._handle_emergency,
+    }
+    bot.register_commands(custom_commands)
+    
     bot.start()
     
-    # Für Testzwecke: Endlosschleife, um den Bot am Laufen zu halten
+    # Endlosschleife, um den Bot am Laufen zu halten (für Testzwecke)
     try:
         while True:
             time.sleep(1)
