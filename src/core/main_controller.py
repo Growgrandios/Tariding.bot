@@ -1,5 +1,3 @@
-# main_controller.py
-
 import os
 import sys
 import logging
@@ -236,9 +234,10 @@ class MainController:
         Returns:
             True bei Erfolg, False bei Fehler
         """
+        # Änderung: Wenn der Bot bereits läuft, wird jetzt einfach True zurückgegeben
         if self.state == BotState.RUNNING:
-            self.logger.warning("Bot läuft bereits")
-            return False
+            self.logger.info("Bot läuft bereits – Startbefehl wird ignoriert.")
+            return True
             
         if self.state == BotState.ERROR:
             self.logger.error("Bot kann aufgrund von Fehlern nicht gestartet werden")
@@ -533,7 +532,7 @@ class MainController:
                 self.logger.error(f"Fehler in der Hauptschleife: {str(e)}")
                 self.logger.error(traceback.format_exc())
                 self._add_event("error", "Fehler in Hauptschleife", {"error": str(e)})
-                time.sleep(5)  # Längere Pause bei Fehlern
+                time.sleep(5)
         
         self.logger.info("Hauptschleife beendet")
     
@@ -938,19 +937,14 @@ class MainController:
             message: Nachrichtentext
             priority: Priorität ('low', 'normal', 'high', 'critical')
         """
-        # Nachricht formatieren
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         formatted_message = f"{message}\n\nZeit: {timestamp}"
         
-        # An Telegram senden
         if hasattr(self.telegram_interface, 'send_message'):
             try:
                 self.telegram_interface.send_notification(title, formatted_message, priority)
             except Exception as e:
                 self.logger.error(f"Fehler beim Senden der Telegram-Benachrichtigung: {str(e)}")
-        
-        # In Zukunft könnten hier weitere Benachrichtigungskanäle hinzugefügt werden
-        # z.B. E-Mail, Push-Benachrichtigungen, etc.
     
     def _add_event(self, event_type: str, title: str, data: Dict[str, Any]):
         """
@@ -967,10 +961,8 @@ class MainController:
             'data': data
         }
         
-        # Ereignis zur Historie hinzufügen
         self.events.append(event)
         
-        # Historie begrenzen
         if len(self.events) > self.max_events:
             self.events = self.events[-self.max_events:]
     
@@ -1035,13 +1027,10 @@ class MainController:
         try:
             metrics = {}
             
-            # Metriken vom Learning-Modul abrufen
             if hasattr(self.learning_module, 'performance_metrics'):
                 metrics['learning'] = self.learning_module.performance_metrics
             
-            # Handelsergebnisse abrufen
             if hasattr(self.learning_module, 'trade_history'):
-                # Einfache Statistiken berechnen
                 trades = self.learning_module.trade_history
                 closed_trades = [t for t in trades if t.status == 'closed']
                 
@@ -1059,7 +1048,6 @@ class MainController:
                         'total_pnl': sum(t.pnl_percent for t in closed_trades if t.pnl_percent is not None)
                     }
             
-            # Steuerliche Informationen
             if hasattr(self.tax_module, 'get_tax_summary'):
                 metrics['tax'] = self.tax_module.get_tax_summary()
             
@@ -1103,24 +1091,20 @@ class MainController:
         try:
             self.logger.info(f"Verarbeite Transkript: {transcript_path}")
             
-            # Prüfen, ob Datei existiert
             if not os.path.exists(transcript_path):
                 return {
                     'status': 'error',
                     'message': f"Transkript-Datei nicht gefunden: {transcript_path}"
                 }
             
-            # Transkript verarbeiten
             if hasattr(self.transcript_processor, 'process_transcript'):
                 result = self.transcript_processor.process_transcript(transcript_path)
                 
-                # Ereignis zur Historie hinzufügen
                 self._add_event("transcript", "Transkript verarbeitet", {
                     'path': transcript_path,
                     'result': result
                 })
                 
-                # Erfolgsmeldung
                 self._send_notification(
                     "Transkript verarbeitet",
                     f"Pfad: {transcript_path}\nErgebnis: {result.get('status', 'Unbekannt')}",
@@ -1158,8 +1142,8 @@ class MainController:
             'running': self.running,
             'modules': self.module_status,
             'last_update': datetime.datetime.now().isoformat(),
-            'events': self.events[-10:],  # Letzten 10 Ereignisse
-            'version': '1.0.0',  # Bot-Version
+            'events': self.events[-10:],
+            'version': '1.0.0',
             'uptime': self._get_uptime()
         }
         
@@ -1171,7 +1155,6 @@ class MainController:
         Returns:
             Laufzeit als formatierter String
         """
-        # In einer vollständigen Implementierung würde hier die tatsächliche Laufzeit berechnet
         return "00:00:00"  # Dummy-Wert
     
     def generate_report(self) -> Dict[str, Any]:
@@ -1181,25 +1164,21 @@ class MainController:
             Bericht als Dictionary
         """
         try:
-            # Basis-Status
             report = {
                 'timestamp': datetime.datetime.now().isoformat(),
                 'status': self.get_status(),
                 'performance': self._get_performance_metrics().get('metrics', {}),
                 'account': self._get_account_balance().get('balance', {}),
                 'positions': self._get_open_positions().get('positions', []),
-                'recent_events': self.events[-20:]  # Letzten 20 Ereignisse
+                'recent_events': self.events[-20:]
             }
             
-            # Learning-Modul-Status
             if hasattr(self.learning_module, 'get_current_status'):
                 report['learning_status'] = self.learning_module.get_current_status()
             
-            # Black Swan Detector Status
             if hasattr(self.black_swan_detector, 'get_current_status'):
                 report['black_swan_status'] = self.black_swan_detector.get_current_status()
             
-            # Marktdaten-Status
             if hasattr(self.data_pipeline, 'get_status'):
                 report['data_status'] = self.data_pipeline.get_status()
             
@@ -1216,14 +1195,11 @@ class MainController:
 # Beispiel für die Ausführung
 if __name__ == "__main__":
     try:
-        # MainController initialisieren
         controller = MainController()
         
-        # Bot starten
         if controller.state == BotState.READY:
-            controller.start(auto_trade=False)  # Nur im Paper-Modus
+            controller.start(auto_trade=False)
             
-            # Endlosschleife, um den Bot laufen zu lassen
             try:
                 while True:
                     time.sleep(1)
