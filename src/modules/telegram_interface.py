@@ -6,22 +6,30 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
 
-from telegram import __version__ as TG_VER
+# from telegram import (
+#    Update,
+#    InlineKeyboardButton,
+#    InlineKeyboardMarkup,
+#    BotCommand,
+#    ParseMode
+# )
+
+# Neue Imports für v20+
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    BotCommand,
-    ParseMode  # Zurück zum alten Import
+    BotCommand
 )
+# ParseMode aus constants importieren
+from telegram.constants import ParseMode
 from telegram.ext import (
-    Updater,  # Zurück zu Updater
+    Application,  # Statt Updater
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    Filters,  # Zurück zu Filters (Großbuchstabe)
-    CallbackContext,  # Zurück zu CallbackContext
-    Dispatcher,
+    filters,  # Kleinbuchstabe statt Filters
+    ContextTypes,  # Statt CallbackContext
     ConversationHandler
 )
 
