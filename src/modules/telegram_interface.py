@@ -75,7 +75,17 @@ class TelegramInterface:
         self.vm_zone = config.get("vm_zone", "us-central1-a")
         
         self.logger.info("Telegram Interface Modul erfolgreich initialisiert")
+
+  def register_commands(self, commands: Dict[str, Callable[[Dict[str, Any]], None]]):
+    """
+    Registriert benutzerdefinierte Befehle, die vom MainController übergeben werden.
     
+    Args:
+        commands: Ein Dictionary, das Befehlsnamen (z.B. "start", "stop") mit den zugehörigen Handler-Funktionen verknüpft.
+    """
+    self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle.")
+    self.commands = commands
+  
     def start(self):
         """Startet den Telegram Bot in einem separaten Thread (Polling-Modus)."""
         if self.is_running:
