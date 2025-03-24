@@ -1,4 +1,4 @@
-# telegram_interface.py
+ telegram_interface.py
 import os
 import logging
 import json
@@ -11,17 +11,17 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    BotCommand,
-    ParseMode
+    BotCommand
 )
+# Neuer Import für ParseMode
+from telegram.constants import ParseMode
 from telegram.ext import (
-    Updater,
+    Application,  # Statt Updater
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    Filters,
-    CallbackContext,
-    Dispatcher,
+    filters,  # Kleinbuchstabe statt Filters
+    ContextTypes,  # Statt CallbackContext
     ConversationHandler
 )
 
