@@ -1,311 +1,331 @@
+# telegram_interface.py
 import os
 import logging
-import threading
-import time
 import json
-import requests
-import subprocess
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Callable, Optional
+import threading
+from datetime import datetime
+from typing import Dict, List, Optional, Callable
 
-TELEGRAM_API_URL = "https://api.telegram.org/bot{}/{}"
+from telegram import __version__ as TG_VER
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommand,
+    ParseMode
+)
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    Filters,
+    CallbackContext,
+    Dispatcher,
+    ConversationHandler
+)
 
-class TelegramInterface:
-    """
-    Ein modernes Telegram Bot Interface Modul zur Fernsteuerung deines Trading Bots.
+# Google Cloud VM Management
+from google.cloud import compute_v1
+
+# Eigene Module integrieren
+from data_pipeline import DataPipeline
+from transcript_processor import TranscriptProcessor
+from live_trading import LiveTradingConnector
+from black_swan_detector import BlackSwanDetector
+
+# Logging Konfiguration
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger("TelegramInterface")
+
+class TelegramTradingInterface:
+    """Master-Interface für Trading-Bot Steuerung via Telegram"""
     
-    Funktionen:
-      - Starten/Stoppen des Bots und (automatisch) der Google VM Instanz
-      - Statusabfragen, Kontostand, offene Positionen und Performance-Berichte
-      - Notfall-Stop mit Bestätigung per Inline-Button
-      - Steuerungsbuttons (z. B. SSH Bot Start) die direkt beim Start angezeigt werden
-    """
-    def __init__(self, config: Dict[str, Any], main_controller: Any):
-        self.logger = logging.getLogger("TelegramInterface")
-        self.logger.info("Initialisiere neues Telegram Interface Modul...")
-        
+    # Konversationszustände
+    STRATEGY_SELECT, RISK_MANAGEMENT, ORDER_CONFIRM = range(3)
+    
+    def __init__(self, config: Dict, trading_modules: Dict):
         self.config = config
-        self.main_controller = main_controller
-        self.bot_token = config.get("bot_token", os.getenv("TELEGRAM_BOT_TOKEN", ""))
-        if not self.bot_token:
-            self.logger.error("Kein Telegram Bot Token gefunden!")
-        allowed_users_raw = config.get("allowed_users", [])
-        if isinstance(allowed_users_raw, str):
-            self.allowed_users = [uid.strip() for uid in allowed_users_raw.split(",") if uid.strip()]
-        elif isinstance(allowed_users_raw, list):
-            self.allowed_users = [str(uid) for uid in allowed_users_raw if uid]
-        else:
-            self.allowed_users = []
-        if not self.allowed_users:
-            self.logger.warning("Keine erlaubten Telegram-Benutzer konfiguriert. Alle Anfragen werden ignoriert.")
-        self.polling_timeout = config.get("polling_timeout", 30)
-        self.last_update_id = 0
-        self.is_running = False
-        self.bot_thread: Optional[threading.Thread] = None
-        self.commands: Dict[str, Callable[[Dict[str, Any]], None]] = {
-            "start_bot": self._handle_start_bot,
-            "stop_bot": self._handle_stop_bot,
-            "status": self._handle_status,
-            "balance": self._handle_balance,
-            "positions": self._handle_positions,
-            "performance": self._handle_performance,
-            "report": self._handle_report,
-            "emergency": self._handle_emergency,
-            "ssh_start": self._handle_ssh_start
-        }
-        self.notification_cooldown = config.get("notification_cooldown", 60)
-        self.last_notification_time: Dict[str, datetime] = {}
-        self.vm_instance_name = config.get("vm_instance_name", "trading-bot-instance")
-        self.vm_zone = config.get("vm_zone", "us-central1-a")
-        self.logger.info("Telegram Interface Modul erfolgreich initialisiert")
-    
-    def register_commands(self, commands: Dict[str, Callable[[Dict[str, Any]], None]]):
-        self.logger.info(f"Registriere {len(commands)} benutzerdefinierte Befehle.")
-        self.commands = commands
+        self.modules = trading_modules
         
-    def start(self):
-        if self.is_running:
-            self.logger.warning("Telegram Bot läuft bereits!")
-            return
-        self.is_running = True
-        self.bot_thread = threading.Thread(target=self._run_bot, daemon=True)
-        self.bot_thread.start()
-        self.logger.info("Telegram Bot gestartet")
-        self._send_notification_to_all("Trading Bot gestartet und bereit für Befehle.")
-        for user_id in self.allowed_users:
-            try:
-                self._send_control_buttons(int(user_id))
-            except Exception as e:
-                self.logger.error(f"Fehler beim Senden der Steuerungsbuttons an {user_id}: {str(e)}")
-                
-    def stop(self):
-        self.is_running = False
-        self.logger.info("Telegram Bot wird gestoppt...")
+        # Initialisiere Telegram Bot
+        self.updater = Updater(token=config['TELEGRAM_TOKEN'], use_context=True)
+        self.dispatcher = self.updater.dispatcher
         
-    def _run_bot(self):
-        self.logger.info("Betrete Polling-Schleife für Telegram-Updates...")
-        session = requests.Session()
-        while self.is_running:
-            try:
-                url = TELEGRAM_API_URL.format(self.bot_token, "getUpdates")
-                params = {
-                    "offset": self.last_update_id + 1,
-                    "timeout": self.polling_timeout,
-                    "allowed_updates": ["message", "callback_query"]
-                }
-                response = session.get(url, params=params, timeout=self.polling_timeout + 5)
-                response.raise_for_status()
-                data = response.json()
-                if data.get("ok") and data.get("result"):
-                    for update in data["result"]:
-                        self.last_update_id = update["update_id"]
-                        self._process_update(update)
-                else:
-                    self.logger.debug("Keine neuen Updates empfangen.")
-            except Exception as e:
-                self.logger.error(f"Fehler beim Abrufen der Updates: {str(e)}")
-                time.sleep(5)
-                
-    def _process_update(self, update: Dict[str, Any]):
-        self.logger.debug(f"Verarbeite Update: {json.dumps(update)}")
-        try:
-            chat_id = None
-            user_id = None
-            message_text = ""
-            callback_data = None
-            if "message" in update:
-                message = update["message"]
-                chat_id = message.get("chat", {}).get("id")
-                user_id = str(message.get("from", {}).get("id"))
-                message_text = message.get("text", "").strip()
-            elif "callback_query" in update:
-                callback = update["callback_query"]
-                chat_id = callback.get("message", {}).get("chat", {}).get("id")
-                user_id = str(callback.get("from", {}).get("id"))
-                callback_data = callback.get("data", "").strip()
-                message_text = callback_data
-            if not chat_id or not user_id:
-                self.logger.warning("Update ohne Chat-ID oder User-ID erhalten – überspringe.")
+        # Google Cloud Client
+        self.vm_client = compute_v1.InstancesClient()
+        self.project_id = config['GCP_PROJECT_ID']
+        self.zone = config['GCP_ZONE']
+        self.instance_name = config['GCP_INSTANCE_NAME']
+        
+        # Sicherheitskonfiguration
+        self.allowed_users = set(config['ALLOWED_USER_IDS'])
+        self.admin_users = set(config['ADMIN_USER_IDS'])
+        
+        # Registriere Handler
+        self._register_handlers()
+        self._set_bot_commands()
+        
+        # Status Tracking
+        self.user_sessions = {}
+        self.last_alerts = {}
+        self.notification_queue = []
+
+        # Starte Nachrichten-Queue Worker
+        self.queue_worker = threading.Thread(target=self._process_notification_queue)
+        self.queue_worker.daemon = True
+        self.queue_worker.start()
+
+    def _register_handlers(self):
+        """Registriere alle Telegram Handler"""
+        handlers = [
+            CommandHandler('start', self.start),
+            CommandHandler('emergency_stop', self.emergency_stop),
+            CommandHandler('vm_control', self.vm_control),
+            CommandHandler('report', self.generate_report),
+            CallbackQueryHandler(self.button_handler),
+            MessageHandler(Filters.text & ~Filters.command, self.message_handler)
+        ]
+        
+        # Konversationshandler für Trading
+        trade_conv = ConversationHandler(
+            entry_points=[CommandHandler('trade', self.start_trade)],
+            states={
+                self.STRATEGY_SELECT: [CallbackQueryHandler(self.strategy_select)],
+                self.RISK_MANAGEMENT: [MessageHandler(Filters.text, self.risk_management)],
+                self.ORDER_CONFIRM: [CallbackQueryHandler(self.order_confirm)]
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_trade)]
+        )
+        handlers.append(trade_conv)
+
+        for handler in handlers:
+            self.dispatcher.add_handler(handler)
+
+    def _set_bot_commands(self):
+        """Setze Bot-Befehle für UI"""
+        commands = [
+            BotCommand('start', 'Starte den Trading Bot'),
+            BotCommand('trade', 'Starte neuen Trade'),
+            BotCommand('report', 'Erhalte aktuellen Report'),
+            BotCommand('vm_control', 'VM Instanz steuern'),
+            BotCommand('emergency_stop', 'Notfall-Stopp aller Aktivitäten')
+        ]
+        self.updater.bot.set_my_commands(commands)
+
+    def _authorized(self, func: Callable) -> Callable:
+        """Decorator für autorisierten Zugriff"""
+        def wrapper(update: Update, context: CallbackContext):
+            user_id = update.effective_user.id
+            if user_id not in self.allowed_users:
+                update.message.reply_text("⛔ Zugriff verweigert. Nicht autorisierter Benutzer.")
+                logger.warning(f"Unautorisierter Zugriff von User-ID: {user_id}")
                 return
-            if self.allowed_users and (user_id not in self.allowed_users):
-                self.logger.warning(f"Nicht autorisierter Zugriff von User {user_id}")
-                self._send_message(chat_id, "Du bist nicht berechtigt, diesen Bot zu steuern.")
-                return
-            if message_text.startswith("/"):
-                parts = message_text[1:].split()
-                command = parts[0].lower()
-                params = parts[1:]
-                self.logger.debug(f"Befehl erhalten: {command} mit Parametern {params}")
-                if command in self.commands:
-                    self.commands[command]({"chat_id": chat_id, "user_id": user_id, "params": params})
-                else:
-                    self._send_message(chat_id, f"Unbekannter Befehl: {command}")
-            elif callback_data:
-                self._handle_callback_query(update)
-            else:
-                self._send_message(chat_id, "Bitte sende einen Befehl beginnend mit '/' (z.B. /status).")
-        except Exception as e:
-            self.logger.error(f"Fehler bei der Verarbeitung eines Updates: {str(e)}")
-            
-    def _send_message(self, chat_id: int, text: str, reply_markup: Optional[Dict] = None):
-        try:
-            url = TELEGRAM_API_URL.format(self.bot_token, "sendMessage")
-            payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-            if reply_markup:
-                payload["reply_markup"] = json.dumps(reply_markup)
-            response = requests.post(url, data=payload)
-            response.raise_for_status()
-            self.logger.debug(f"Nachricht an {chat_id} gesendet: {text}")
-        except Exception as e:
-            self.logger.error(f"Fehler beim Senden der Nachricht an {chat_id}: {str(e)}")
-            
-    def _send_notification_to_all(self, text: str):
-        for user_id in self.allowed_users:
-            try:
-                self._send_message(int(user_id), text)
-            except Exception as e:
-                self.logger.error(f"Fehler beim Senden der Benachrichtigung an {user_id}: {str(e)}")
-                
-    def _send_control_buttons(self, chat_id: int):
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "SSH Bot Start", "callback_data": "ssh_start"}],
-                [{"text": "Notfall Stop", "callback_data": "confirm_emergency_stop"}],
-                [{"text": "Hauptmenü", "callback_data": "menu"}]
-            ]
-        }
-        self._send_message(chat_id, "Steuerung:", reply_markup)
+            return func(update, context)
+        return wrapper
+
+    # --- Kernfunktionen ---
+    @_authorized
+    def start(self, update: Update, context: CallbackContext):
+        """Startkommando mit interaktivem Dashboard"""
+        keyboard = [
+            [InlineKeyboardButton("🚀 Live Trading", callback_data='live_dashboard'),
+             InlineKeyboardButton("📈 Strategien", callback_data='strategies')],
+            [InlineKeyboardButton("⚠️ Notfall-Stopp", callback_data='emergency'),
+             InlineKeyboardButton("📊 Reports", callback_data='reports')],
+            [InlineKeyboardButton("⚙️ Einstellungen", callback_data='settings')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-    def _handle_callback_query(self, update: Dict[str, Any]):
-        try:
-            callback_query = update.get("callback_query", {})
-            data = callback_query.get("data", "")
-            chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
-            if data == "ssh_start":
-                self.logger.info("SSH Start Button gedrückt.")
-                self._handle_ssh_start({"chat_id": chat_id, "user_id": "callback"})
-            elif data == "confirm_emergency_stop":
-                self.logger.critical("Notfall-Stop bestätigt über Button.")
+        update.message.reply_text(
+            "🤖 *Trading Bot Kontrollzentrum* 🤖\n"
+            "Wähle eine Option:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
+
+    @_authorized
+    def emergency_stop(self, update: Update, context: CallbackContext):
+        """Notfall-Stopp aller Trading-Aktivitäten"""
+        self.modules['live_trading'].stop_trading()
+        self.modules['data_pipeline'].stop_auto_updates()
+        
+        # Alle offenen Positionen schließen
+        self.close_all_positions()
+        
+        update.message.reply_text(
+            "🛑 *NOTFALL-STOPP AKTIVIERT* 🛑\n"
+            "Alle Trading-Aktivitäten wurden gestoppt!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    def _process_notification_queue(self):
+        """Verarbeite die Nachrichten-Queue für Echtzeit-Updates"""
+        while True:
+            while self.notification_queue:
+                msg, priority = self.notification_queue.pop(0)
                 try:
-                    self.main_controller.emergency_stop()
-                    self._send_message(chat_id, "Notfall-Stop wurde ausgeführt. Alle Aktivitäten wurden sofort gestoppt.")
+                    for user in self.admin_users:
+                        self.updater.bot.send_message(
+                            chat_id=user,
+                            text=msg,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
                 except Exception as e:
-                    self._send_message(chat_id, f"Fehler beim Ausführen des Notfall-Stops: {str(e)}")
-            elif data == "menu":
-                self._send_main_menu(chat_id)
-            else:
-                self.logger.debug(f"Unbekannter Callback-Datenwert: {data}")
-        except Exception as e:
-            self.logger.error(f"Fehler beim Verarbeiten der Callback Query: {str(e)}")
-            
-    def process_callback_update(self, update: Dict[str, Any]):
-        self._handle_callback_query(update)
+                    logger.error(f"Fehler beim Senden der Benachrichtigung: {str(e)}")
+            time.sleep(1)
+
+    # --- VM Management ---
+    @_authorized
+    def vm_control(self, update: Update, context: CallbackContext):
+        """Steuere die Google Cloud VM Instanz"""
+        keyboard = [
+            [InlineKeyboardButton("▶️ VM Starten", callback_data='vm_start'),
+             InlineKeyboardButton("⏹️ VM Stoppen", callback_data='vm_stop')],
+            [InlineKeyboardButton("🔄 Status Abfragen", callback_data='vm_status')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-    def _handle_start_bot(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("Startbefehl empfangen: Starte Trading Bot und VM Instanz...")
-        vm_started, vm_response = self._start_vm_instance()
-        if vm_started:
-            start_msg = "VM Instanz erfolgreich gestartet.\n"
-        else:
-            start_msg = "VM Instanz konnte nicht gestartet werden:\n" + vm_response + "\n"
-        try:
-            self.main_controller.start(mode="live", auto_trade=True)
-            start_msg += "Trading Bot wurde gestartet."
-        except Exception as e:
-            start_msg += f"Fehler beim Starten des Bots: {str(e)}"
-        self._send_message(chat_id, start_msg)
-        
-    def _handle_stop_bot(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("Stop-Befehl empfangen: Stoppe Trading Bot...")
-        try:
-            self.main_controller.stop()
-            self._send_message(chat_id, "Trading Bot wurde gestoppt.")
-        except Exception as e:
-            self._send_message(chat_id, f"Fehler beim Stoppen des Bots: {str(e)}")
-            
-    def _handle_status(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("Statusabfrage erhalten")
-        try:
-            status = self.main_controller.get_status()
-            self._send_message(chat_id, f"<b>Bot-Status:</b>\n{json.dumps(status, indent=2)}")
-        except Exception as e:
-            self._send_message(chat_id, f"Fehler beim Abrufen des Status: {str(e)}")
-            
-    def _handle_balance(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("Balanceabfrage erhalten")
-        try:
-            balance = self.main_controller.get_account_balance()
-            self._send_message(chat_id, f"<b>Kontostand:</b>\n{json.dumps(balance, indent=2)}")
-        except Exception as e:
-            self._send_message(chat_id, f"Fehler beim Abrufen des Kontostands: {str(e)}")
-            
-    def _handle_positions(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("Positionsabfrage erhalten")
-        try:
-            positions = self.main_controller.get_open_positions()
-            self._send_message(chat_id, f"<b>Offene Positionen:</b>\n{json.dumps(positions, indent=2)}")
-        except Exception as e:
-            self._send_message(chat_id, f"Fehler beim Abrufen der Positionen: {str(e)}")
-            
-    def _handle_performance(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("Performanceabfrage erhalten")
-        try:
-            performance = self.main_controller.get_performance_metrics()
-            self._send_message(chat_id, f"<b>Performance:</b>\n{json.dumps(performance, indent=2)}")
-        except Exception as e:
-            self._send_message(chat_id, f"Fehler beim Abrufen der Performance: {str(e)}")
-            
-    def _handle_report(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("Berichtsanforderung erhalten")
-        try:
-            report = self.main_controller.generate_report()
-            self._send_message(chat_id, f"<b>Bericht:</b>\n{report}")
-        except Exception as e:
-            self._send_message(chat_id, f"Fehler beim Erzeugen des Berichts: {str(e)}")
-            
-    def _handle_emergency(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.critical("EMERGENCY-Befehl empfangen! Notfall-Stop wird eingeleitet.")
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "Notfall stoppen", "callback_data": "confirm_emergency_stop"}]
-            ]
+        update.message.reply_text(
+            "☁️ *Google Cloud VM Management* ☁️\n"
+            "Wähle eine Aktion:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
+
+    def _vm_operation(self, operation: str):
+        """Führe VM-Operationen aus"""
+        ops = {
+            'start': self.vm_client.start,
+            'stop': self.vm_client.stop,
+            'status': self.vm_client.get
         }
-        self._send_message(chat_id, "Bist du sicher, dass du einen Notfall-Stop auslösen möchtest?", reply_markup)
-        
-    def _handle_ssh_start(self, context: Dict[str, Any]):
-        chat_id = context["chat_id"]
-        self.logger.info("SSH Start Befehl empfangen.")
         try:
-            status = self.main_controller.get_status()
-            if status.get("state", "").lower() != "running":
-                result = subprocess.run(["bash", "run.sh"], capture_output=True, text=True, check=False)
-                if result.returncode == 0:
-                    self._send_message(chat_id, "Bot wurde erfolgreich über SSH gestartet.")
-                else:
-                    self._send_message(chat_id, f"Fehler beim Starten des Bots über SSH:\n{result.stderr}")
-            else:
-                self._send_message(chat_id, "Bot läuft bereits.")
+            result = ops[operation](
+                project=self.project_id,
+                zone=self.zone,
+                instance=self.instance_name
+            )
+            return f"VM {operation} erfolgreich: {result.status}"
         except Exception as e:
-            self._send_message(chat_id, f"Fehler beim SSH-Start: {str(e)}")
-            
-    def _send_main_menu(self, chat_id: int):
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "Start", "callback_data": "start_bot"}, {"text": "Stop", "callback_data": "stop_bot"}],
-                [{"text": "Kontostand", "callback_data": "balance"}, {"text": "Positionen", "callback_data": "positions"}],
-                [{"text": "Performance", "callback_data": "performance"}, {"text": "Report", "callback_data": "report"}],
-                [{"text": "Notfall Stop", "callback_data": "confirm_emergency_stop"}]
-            ]
-        }
-        self._send_message(chat_id, "Hauptmenü:", reply_markup)
+            logger.error(f"VM Operation fehlgeschlagen: {str(e)}")
+            return f"❌ Fehler bei VM {operation}: {str(e)}"
+
+    # --- Trading-Funktionen ---
+    def start_trade(self, update: Update, context: CallbackContext):
+        """Starte Trading-Konversation"""
+        strategies = self.modules['strategy_manager'].get_available_strategies()
+        keyboard = [
+            [InlineKeyboardButton(s['name'], callback_data=s['id'])]
+            for s in strategies
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-    def process_callback_update(self, update: Dict[str, Any]):
-        self._handle_callback_query(update)
+        update.message.reply_text(
+            "📊 Verfügbare Strategien:\n"
+            "Wähle eine Trading-Strategie:",
+            reply_markup=reply_markup
+        )
+        return self.STRATEGY_SELECT
+
+    def strategy_select(self, update: Update, context: CallbackContext):
+        """Verarbeite Strategieauswahl"""
+        query = update.callback_query
+        strategy_id = query.data
+        context.user_data['strategy_id'] = strategy_id
+        
+        query.edit_message_text(
+            text=f"Gewählte Strategie: {strategy_id}\n"
+                 "Bitte Risikoparameter eingeben (Format: Risiko% StopLoss% TakeProfit%):\n"
+                 "Beispiel: 2 5 10"
+        )
+        return self.RISK_MANAGEMENT
+
+    # --- Benachrichtigungssystem ---
+    def send_real_time_alert(self, alert_data: Dict):
+        """Sende Echtzeit-Alert an registrierte Benutzer"""
+        alert_msg = (
+            f"🚨 *{alert_data['type'].upper()} ALERT* 🚨\n"
+            f"*Symbol*: {alert_data['symbol']}\n"
+            f"*Preis*: {alert_data['price']}\n"
+            f"*Nachricht*: {alert_data['message']}"
+        )
+        self.notification_queue.append((alert_msg, 'high'))
+
+    # --- Integration mit anderen Modulen ---
+    def register_module_callbacks(self):
+        """Registriere Callbacks für andere Module"""
+        # Live Trading
+        self.modules['live_trading'].register_notification_callback(
+            self.handle_trading_update
+        )
+        
+        # Black Swan Detector
+        self.modules['black_swan'].register_notification_callback(
+            self.handle_black_swan_alert
+        )
+
+    def handle_trading_update(self, update_data: Dict):
+        """Verarbeite Trading-Updates"""
+        msg = (
+            f"📊 *Trade Update* 📊\n"
+            f"Order {update_data['status']}:\n"
+            f"Symbol: {update_data['symbol']}\n"
+            f"Typ: {update_data['type']}\n"
+            f"Menge: {update_data['amount']}"
+        )
+        self.notification_queue.append((msg, 'medium'))
+
+    def handle_black_swan_alert(self, alert_data: Dict):
+        """Verarbeite Black Swan Events"""
+        alert_msg = (
+            f"⚠️⚫ *Black Swan Event* ⚫⚠️\n"
+            f"Typ: {alert_data['details']['type']}\n"
+            f"Schweregrad: {alert_data['severity']}/1.0\n"
+            f"Empfehlung: {alert_data['recommendation']}"
+        )
+        self.notification_queue.append((alert_msg, 'critical'))
+
+    # --- Hilfsfunktionen ---
+    def _format_report(self, report_data: Dict) -> str:
+        """Formatiere Trading-Bericht für Telegram"""
+        return (
+            "📈 *Tagesbericht* 📈\n"
+            f"*Portfoliowert*: ${report_data['portfolio_value']:.2f}\n"
+            f"*Heutige Trades*: {report_data['trades_today']}\n"
+            f"*Gewinn/Verlust*: {report_data['pnl']}%\n"
+            f"*Risikoexposure*: {report_data['risk_exposure']}%\n"
+            "🔔 Aktuelle Marktbedingungen: "
+            f"{report_data['market_condition']}"
+        )
+
+    def run(self):
+        """Starte den Telegram Bot"""
+        logger.info("Starting Telegram Interface...")
+        self.updater.start_polling()
+        self.updater.idle()
+
+if __name__ == '__main__':
+    config = {
+        'TELEGRAM_TOKEN': os.getenv('TELEGRAM_TOKEN'),
+        'GCP_PROJECT_ID': os.getenv('GCP_PROJECT_ID'),
+        'GCP_ZONE': 'europe-west3-a',
+        'GCP_INSTANCE_NAME': 'trading-bot-vm',
+        'ALLOWED_USER_IDS': [12345678],
+        'ADMIN_USER_IDS': [12345678]
+    }
+    
+    # Modul-Instanzen (Beispiel)
+    modules = {
+        'live_trading': LiveTradingConnector(config),
+        'data_pipeline': DataPipeline(config),
+        'black_swan': BlackSwanDetector(config),
+        'transcript_processor': TranscriptProcessor(config)
+    }
+    
+    interface = TelegramTradingInterface(config, modules)
+    interface.register_module_callbacks()
+    interface.run()
