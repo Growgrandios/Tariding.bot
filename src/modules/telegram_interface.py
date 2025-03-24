@@ -19,7 +19,7 @@ class TelegramInterface:
       - Starten/Stoppen des Bots und (automatisch) der Google VM Instanz
       - Statusabfragen, Kontostand, offene Positionen und Performance-Berichte
       - Notfall-Stop mit Bestätigung per Inline-Button
-      - Interaktive Inline-Buttons für Aktionen (z. B. Notfall‑Stop bestätigen)
+      - Steuerungsbuttons (z. B. SSH Bot Start) die sofort beim Start angezeigt werden
       - Erweiterbar und modular, um sich harmonisch in alle Bot-Module einzuklinken
     """
     def __init__(self, config: Dict[str, Any], main_controller: Any):
@@ -64,6 +64,7 @@ class TelegramInterface:
             "performance": self._handle_performance,
             "report": self._handle_report,
             "emergency": self._handle_emergency,
+            "ssh_start": self._handle_ssh_start
         }
         
         # Notifikationsparameter
@@ -98,6 +99,12 @@ class TelegramInterface:
         self.logger.info("Telegram Bot gestartet")
         # Sende initialen Status an alle erlaubten Benutzer
         self._send_notification_to_all("Trading Bot gestartet und bereit für Befehle.")
+        # Sende sofort Steuerungsbuttons an alle erlaubten Benutzer
+        for user_id in self.allowed_users:
+            try:
+                self._send_control_buttons(int(user_id))
+            except Exception as e:
+                self.logger.error(f"Fehler beim Senden der Steuerungsbuttons an {user_id}: {str(e)}")
     
     def stop(self):
         """Stoppt den Telegram Bot (Polling-Schleife wird beendet)."""
@@ -171,6 +178,9 @@ class TelegramInterface:
                     self.commands[command]({"chat_id": chat_id, "user_id": user_id, "params": params})
                 else:
                     self._send_message(chat_id, f"Unbekannter Befehl: {command}")
+            # Falls es sich um eine Callback Query handelt:
+            elif callback_data:
+                self._handle_callback_query(update)
             else:
                 self._send_message(chat_id, "Bitte sende einen Befehl beginnend mit '/' (z. B. /status).")
         except Exception as e:
@@ -196,6 +206,19 @@ class TelegramInterface:
                 self._send_message(int(user_id), text)
             except Exception as e:
                 self.logger.error(f"Fehler beim Senden der Benachrichtigung an {user_id}: {str(e)}")
+    
+    def _send_control_buttons(self, chat_id: int):
+        """
+        Sendet eine Nachricht mit Inline-Buttons, die direkt beim Start angezeigt werden.
+        Die Buttons ermöglichen z. B. einen SSH-Startbefehl oder einen Notfall-Stop.
+        """
+        reply_markup = {
+            "inline_keyboard": [
+                [{"text": "SSH Bot Start", "callback_data": "ssh_start"}],
+                [{"text": "Notfall Stop", "callback_data": "confirm_emergency_stop"}]
+            ]
+        }
+        self._send_message(chat_id, "Steuerung:", reply_markup)
     
     # --------------------- Befehls-Handler ---------------------
     def _handle_start_bot(self, context: Dict[str, Any]):
@@ -315,6 +338,27 @@ class TelegramInterface:
         }
         self._send_message(chat_id, "Bist du sicher, dass du einen Notfall-Stop auslösen möchtest?", reply_markup)
     
+    def _handle_ssh_start(self, context: Dict[str, Any]):
+        """
+        /ssh_start oder Callback via Button
+        Prüft, ob der Bot nicht läuft und führt dann in der SSH-Konsole "bash run.sh" aus, um den Bot zu starten.
+        """
+        chat_id = context["chat_id"]
+        self.logger.info("SSH Start Befehl empfangen.")
+        try:
+            # Überprüfe den Bot-Status (erwartet, dass main_controller.get_status() ein Dictionary mit "state" liefert)
+            status = self.main_controller.get_status()
+            if status.get("state", "").lower() != "running":
+                result = subprocess.run(["bash", "run.sh"], capture_output=True, text=True, check=False)
+                if result.returncode == 0:
+                    self._send_message(chat_id, "Bot wurde erfolgreich über SSH gestartet.")
+                else:
+                    self._send_message(chat_id, f"Fehler beim Starten des Bots über SSH:\n{result.stderr}")
+            else:
+                self._send_message(chat_id, "Bot läuft bereits.")
+        except Exception as e:
+            self._send_message(chat_id, f"Fehler beim SSH-Start: {str(e)}")
+    
     # --------------------- Inline-Callback-Handler ---------------------
     def _handle_callback_query(self, update: Dict[str, Any]):
         """
@@ -331,6 +375,11 @@ class TelegramInterface:
                     self._send_message(chat_id, "Notfall-Stop wurde ausgeführt. Alle Aktivitäten wurden sofort gestoppt.")
                 except Exception as e:
                     self._send_message(chat_id, f"Fehler beim Ausführen des Notfall-Stops: {str(e)}")
+            elif data == "ssh_start":
+                self.logger.info("SSH Start Button gedrückt.")
+                self._handle_ssh_start({"chat_id": chat_id, "user_id": "callback"})
+            else:
+                self.logger.debug(f"Unbekannter Callback-Datenwert: {data}")
         except Exception as e:
             self.logger.error(f"Fehler beim Verarbeiten der Callback Query: {str(e)}")
     
@@ -399,7 +448,8 @@ if __name__ == "__main__":
         def stop(self):
             print("Trading Bot gestoppt.")
         def get_status(self):
-            return {"state": "running", "modules": {"live_trading": "active", "learning": "idle"}}
+            # Beispielstatus: state kann "running" oder etwas anderes sein
+            return {"state": "stopped", "modules": {"live_trading": "active", "learning": "idle"}}
         def get_account_balance(self):
             return {"USD": 10000, "BTC": 0.5}
         def get_open_positions(self):
@@ -424,6 +474,7 @@ if __name__ == "__main__":
         "performance": bot._handle_performance,
         "report": bot._handle_report,
         "emergency": bot._handle_emergency,
+        "ssh_start": bot._handle_ssh_start
     }
     bot.register_commands(custom_commands)
     
