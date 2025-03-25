@@ -882,4 +882,4 @@ class TelegramInterface:
                 return
             
             # Extract metrics
-          metrics = performance_data.get('metrics', {}
+metrics = performance_data.get('metrics', {})
