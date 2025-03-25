@@ -864,22 +864,63 @@ class TelegramInterface:
                 f"❌ Error generating tax report: {str(e)}\n\nCheck logs for details."
             )
 
-    async def _handle_daily_report(self, query):
-        """Handle daily_report callback - show daily performance report"""
-        await query.edit_message_text("Generating daily report, please wait...")
+ async def _handle_daily_report(self, query):
+    """Handle daily_report callback - show daily performance report"""
+    await query.edit_message_text("Generating daily report, please wait...")
+    
+    try:
+        # Get performance data
+        performance_data = self.main_controller._get_performance_metrics()
+        positions_data = self.main_controller._get_open_positions()
+        balance_data = self.main_controller._get_account_balance()
         
-        try:
-            # Get performance data
-            performance_data = self.main_controller._get_performance_metrics()
-            positions_data = self.main_controller._get_open_positions()
-            balance_data = self.main_controller._get_account_balance()
-            
-            # Check if all data was retrieved successfully
-            if any(data.get('status') != 'success' for data in [performance_data, positions_data, balance_data]):
-                await query.edit_message_text(
-                    "❌ Failed to generate daily report: Unable to retrieve all required data."
-                )
-                return
-            
-            # Extract metrics
-            metrics = performance_data.get('metrics', {})
+        # Check if all data was retrieved successfully
+        if any(data.get('status') != 'success' for data in [performance_data, positions_data, balance_data]):
+            await query.edit_message_text(
+                "❌ Failed to generate daily report: Unable to retrieve all required data."
+            )
+            return
+        
+        # Extract metrics
+        metrics = performance_data.get('metrics', {})
+        
+        # Format the daily report
+        report = "📊 *Daily Performance Report*\n\n"
+        
+        # Add trading metrics
+        trading_metrics = metrics.get('trading', {})
+        report += "*Trading Performance:*\n"
+        report += f"Total Trades: {trading_metrics.get('total_trades', 0)}\n"
+        report += f"Win Rate: {trading_metrics.get('win_rate', 0):.2%}\n"
+        report += f"Total PnL: {trading_metrics.get('total_pnl', 0):.2f}%\n\n"
+        
+        # Add account balance
+        account_balance = balance_data.get('balance', {})
+        report += "*Account Balance:*\n"
+        report += f"Total Balance: ${account_balance.get('total_balance_usd', 0):,.2f}\n"
+        report += f"Available Balance: ${account_balance.get('available_balance_usd', 0):,.2f}\n\n"
+        
+        # Add open positions summary
+        open_positions = positions_data.get('positions', [])
+        report += f"*Open Positions:* {len(open_positions)}\n\n"
+        
+        # Add buttons
+        keyboard = [
+            [InlineKeyboardButton("📈 Detailed Performance", callback_data="detailed_performance")],
+            [InlineKeyboardButton("💼 Open Positions", callback_data="open_positions")],
+            [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Send the report
+        await query.edit_message_text(
+            report,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    
+    except Exception as e:
+        self.logger.error(f"Error generating daily report: {str(e)}")
+        await query.edit_message_text(
+            f"❌ Error generating daily report: {str(e)}\n\nPlease try again later."
+        )
