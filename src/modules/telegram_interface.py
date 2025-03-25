@@ -56,6 +56,14 @@ class TelegramInterface:
         # Command callbacks dictionary
         self.command_handlers = {}
         
+        # Priority emojis for notifications
+        self.priority_emoji = {
+            "low": "ℹ️",
+            "normal": "📊", 
+            "high": "⚠️",
+            "critical": "🚨"
+        }
+        
         # Setup bot if enabled
         if self.enabled and self.bot_token:
             try:
